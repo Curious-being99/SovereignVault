@@ -1,0 +1,65 @@
+15:    const columns = db.prepare("PRAGMA table_info(files)").all() as any[];
+81:      db.prepare(
+143:    db.prepare(
+656:    // db.prepare("DELETE FROM files WHERE (size <= 0 OR size IS NULL) AND isFolder = 0").run();
+744:                db.prepare("DELETE FROM files WHERE id = ?").run(fileId);
+802:                db.prepare(
+870:                  const insertChunk = db.prepare(
+928:          db.prepare("DELETE FROM mesh_shadow_blocks WHERE dagHash = ?").run(
+932:        db.prepare("DELETE FROM files WHERE id = ?").run(f.id);
+937:          db.prepare("DELETE FROM files WHERE id = ?").run(f.id);
+947:  db.prepare(
+1029:              db.prepare(
+1281:              db.prepare(
+1534:    db.prepare("DELETE FROM file_chunks WHERE fileId = ?").run(fileId);
+1754:      db.prepare(
+1767:    const allUsers = db.prepare("SELECT * FROM users").all() as any[];
+1774:        db.prepare("UPDATE users SET vaultSeedId = ? WHERE id = ?").run(
+1797:        db.prepare(
+1800:        db.prepare(
+1906:    const allChunks = db.prepare("SELECT chunkHash FROM file_chunks").all() as {
+1914:    const allUsers = db.prepare("SELECT vaultSeedId FROM users").all() as {
+2203:          db.prepare("UPDATE files SET userId = ? WHERE id = ?").run(
+2208:          db.prepare("DELETE FROM files WHERE id = ?").run(f.id);
+2247:            db.prepare(
+2411:    db.prepare(
+2453:  const updateStmt = db.prepare(
+2657:        const stmt = db.prepare(`
+2825:            db.prepare(
+2870:        db.prepare("DELETE FROM file_chunks WHERE fileId = ?").run(fileId);
+2935:      const insertChunk = db.prepare(
+3057:        db.prepare(
+3088:            db.prepare("DELETE FROM file_chunks WHERE fileId = ?").run(fileId);
+3091:            db.prepare("UPDATE files SET merkleRoot = ? WHERE id = ?").run(
+3170:      db.prepare(
+3267:      const getStmt = db.prepare(
+3304:      const insertStmt = db.prepare(
+3925:                  const insertStmt = db.prepare(`
+4074:                    const insertStmt = db.prepare(`
+4199:      const insertStmt = db.prepare(`
+4724:          const insertStmt = db.prepare(`
+5164:      const file = db.prepare("SELECT * FROM files WHERE id = ?").get(fileId) as any;
+5176:        db.prepare("UPDATE files SET merkleRoot = ? WHERE id = ?").run(corruptedMerkle, fileId);
+5202:        db.prepare("UPDATE files SET merkleRoot = ? WHERE id = ?").run(diskMerkleRoot, fileId);
+5369:          db.prepare(
+5451:          const insertFileStmt = db.prepare(`
+5521:                db.prepare(
+5659:                db.prepare(
+5760:      const stmt = db.prepare(
+5807:        const stmt = db.prepare(
+5903:        db.prepare(
+5914:        db.prepare(
+6054:      db.prepare(
+6071:      db.prepare(
+6595:            db.prepare(
+6613:          db.prepare(
+6794:      const stmt = db.prepare(`
+6986:          db.prepare(
+7003:        db.prepare(
+7040:        db.prepare(
+7105:        db.prepare("DELETE FROM files WHERE id = ?").run(f.id);
+7109:          db.prepare(
+7112:          db.prepare(
+7187:      db.prepare("DELETE FROM files WHERE id = ?").run(fileId);
+7191:        db.prepare(
+7194:        db.prepare(

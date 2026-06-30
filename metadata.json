@@ -1,0 +1,8 @@
+{
+  "name": "Sovereign Vault",
+  "description": "An offline-first, encrypted, and real-time synchronized file storage application.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
