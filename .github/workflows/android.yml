@@ -43,7 +43,7 @@ jobs:
       run: cd android && ./gradlew assembleDebug
 
     - name: Rename APK
-      run: mv android/app/build/outputs/apk/debug/app-sovereignvault-debug.apk android/app/build/outputs/apk/debug/app-sovereignvault.apk
+      run: mv android/app/build/outputs/apk/debug/app-debug.apk android/app/build/outputs/apk/debug/app-sovereignvault.apk
 
     - name: Upload APK
       uses: actions/upload-artifact@v3
