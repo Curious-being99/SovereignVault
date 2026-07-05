@@ -1,0 +1,18 @@
+image: reactnativecommunity/react-native-android:latest
+
+stages:
+  - build
+
+build_android:
+  stage: build
+  script:
+    - npm install
+    - npm run build
+    - npx cap sync android
+    - cd android
+    - chmod +x gradlew
+    - ./gradlew assembleDebug
+    - mv app/build/outputs/apk/debug/app-debug.apk ../app-sovereignvault.apk
+  artifacts:
+    paths:
+      - app-sovereignvault.apk
