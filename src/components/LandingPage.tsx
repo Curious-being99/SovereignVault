@@ -12,7 +12,6 @@ import {
   EyeOff, 
   Briefcase,
   Layers,
-  Zap,
   Globe,
   Database,
   ArrowRight,
@@ -20,11 +19,11 @@ import {
   AlertTriangle,
   RotateCcw,
   Download,
+  Fingerprint,
   ShieldAlert,
-  QrCode
+  X
 } from "lucide-react";
 import { UserProfile } from "../lib/db";
-import { QRScannerOverlay } from "./QRScannerOverlay";
 
 interface LandingPageProps {
   usernameInput: string;
@@ -40,8 +39,9 @@ interface LandingPageProps {
   handleLogin: (e: React.FormEvent, overrideUsername?: string) => void;
   handleQuickSwitchUser: (user: UserProfile) => void;
   handleVaultPackImport: (e: any, directText?: string) => void;
+  handleMnemonicOrMasterKeyRecovery?: (username: string, mnemonicOrKey: string, pinOrPass: string) => Promise<void>;
   hasBiometric?: boolean;
-  handleBiometricLogin?: () => void;
+  handleBiometricSign?: () => void;
 }
 
 export const LandingPage: React.FC<LandingPageProps> = ({
@@ -58,12 +58,19 @@ export const LandingPage: React.FC<LandingPageProps> = ({
   handleLogin,
   handleQuickSwitchUser,
   handleVaultPackImport,
+  handleMnemonicOrMasterKeyRecovery,
   hasBiometric,
-  handleBiometricLogin,
+  handleBiometricSign,
 }) => {
   const [authMode, setAuthMode] = useState<"landing" | "register" | "login">("landing");
   const [isDraggingImport, setIsDraggingImport] = useState(false);
-  const [showQRScanner, setShowQRScanner] = useState(false);
+  const [showRecoveryDesk, setShowRecoveryDesk] = useState(false);
+  const [recoveryTab, setRecoveryTab] = useState<"upload" | "paste" | "seed">("upload");
+  const [pastedPackText, setPastedPackText] = useState("");
+  const [recoverUsername, setRecoverUsername] = useState("");
+  const [recoverMnemonic, setRecoverMnemonic] = useState("");
+  const [recoverPin, setRecoverPin] = useState("");
+  const [isProcessingRecovery, setIsProcessingRecovery] = useState(false);
 
   const onDragOverImport = (e: React.DragEvent) => {
     e.preventDefault();
@@ -92,7 +99,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
       onDragOver={onDragOverImport}
       onDragLeave={onDragLeaveImport}
       onDrop={onDropImport}
-      className={`relative w-full min-h-screen bg-slate-950 text-slate-200 selection:bg-indigo-500/30 transition-colors duration-300 ${isDraggingImport ? 'bg-indigo-950/40' : ''}`}
+      className={`relative w-full flex flex-col flex-1 bg-slate-950 text-slate-200 selection:bg-indigo-500/30 transition-colors duration-300 ${isDraggingImport ? 'bg-indigo-950/40' : ''} ${authMode !== 'landing' ? 'fixed inset-0 overflow-hidden z-[100]' : ''}`}
     >
       <AnimatePresence>
         {isDraggingImport && (
@@ -123,15 +130,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             className="max-w-6xl mx-auto px-6 py-20 lg:py-32 flex flex-col items-center text-center"
           >
             <motion.div
-              initial={{ scale: 0.8, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.2 }}
               className="flex flex-col items-center mb-12"
             >
-              <div className="w-20 h-20 bg-slate-900 border border-slate-800 rounded-3xl flex items-center justify-center mb-4 shadow-2xl relative group">
-                <div className="absolute inset-0 bg-indigo-500/10 blur-2xl group-hover:bg-indigo-500/20 transition-all rounded-full" />
-                <Briefcase className="w-10 h-10 text-indigo-400 relative z-10" />
-              </div>
               <div className="px-3 py-1 bg-indigo-500/10 border border-indigo-500/20 rounded-full">
                 <span className="text-[10px] font-black text-indigo-400 uppercase tracking-[0.3em]">Secure Zone</span>
               </div>
@@ -562,7 +565,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                   </div>
                 </div>
 
-                {/* Simulated Network Flow Mechanics Legend */}
+                {/* Active Decentralized Network Flow Mechanics Legend */}
                 <div className="p-6 bg-slate-900/15 border border-white/[0.03] rounded-2.5xl space-y-4">
                   <div className="flex items-center gap-2 font-mono text-[10px] font-black text-indigo-400">
                     <span>◈</span>
@@ -647,9 +650,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             initial={{ opacity: 0, scale: 0.98 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 1.02 }}
-            className="min-h-screen flex items-center justify-center p-6"
+            className="flex-1 flex flex-col items-center justify-center p-0 sm:p-6 overflow-y-auto"
           >
-            <div className="w-full max-w-lg">
+            <div className="w-full max-w-lg h-full sm:h-auto flex flex-col">
               <button
                 onClick={() => setAuthMode("landing")}
                 className="group mb-8 flex items-center gap-2 text-slate-500 hover:text-white transition-colors text-xs font-black uppercase tracking-widest"
@@ -658,29 +661,26 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                 Back to overview
               </button>
 
-              <div className="bg-slate-900/50 backdrop-blur-3xl border border-slate-800 p-5 sm:p-10 rounded-2xl sm:rounded-[40px] shadow-2xl">
-                <div className="mb-10 text-center">
-                  <div className="inline-flex w-16 h-16 bg-indigo-600 rounded-2xl items-center justify-center shadow-[0_0_30px_rgba(79,70,229,0.3)] mb-6">
-                    <Briefcase className="w-8 h-8 text-white" />
-                  </div>
-                  <h2 className="text-2xl sm:text-3xl font-black text-white mb-2 uppercase tracking-tighter">
-                    {authMode === "register" ? "New Sovereign" : "Unlock Workspace"}
+              <div className="flex-1 sm:flex-none bg-slate-900/50 backdrop-blur-3xl border-0 sm:border border-slate-800 pt-16 p-6 sm:p-10 rounded-none sm:rounded-[40px] shadow-none sm:shadow-2xl flex flex-col justify-center">
+                <div className="mb-8 sm:mb-10 text-center">
+                  <h2 className="text-xl sm:text-3xl font-black text-white mb-1.5 sm:mb-2 uppercase tracking-tighter">
+                    {authMode === "register" ? "New Sovereign" : "Unlock Vault"}
                   </h2>
-                  <p className="text-slate-500 text-xs sm:text-sm font-medium">
+                  <p className="text-slate-500 text-[10px] sm:text-sm font-medium">
                     {authMode === "register" 
-                      ? "Establish your decentralized hardware identity."
-                      : "Provide your master seed to decrypt local nodes."}
+                      ? "Establish decentralized hardware identity."
+                      : "Provide master seed to decrypt nodes."}
                   </p>
                 </div>
 
                 <form 
                   onSubmit={authMode === "register" ? handleRegister : (e) => handleLogin(e)} 
-                  className="space-y-6"
+                  className="space-y-4 sm:space-y-6"
                 >
-                  <div className="space-y-4">
+                  <div className="space-y-3 sm:space-y-4">
                     <div>
-                      <label className="block text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 mb-2 ml-1">
-                        Vault Username
+                      <label className="block text-[9px] sm:text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 mb-1.5 sm:mb-2 ml-1">
+                        Username
                       </label>
                       <input
                         type="text"
@@ -688,14 +688,14 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                         value={usernameInput}
                         onChange={(e) => setUsernameInput(e.target.value)}
                         placeholder="identity_node_01"
-                        className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-5 py-4 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all font-bold placeholder-slate-700 shadow-inner"
+                        className="w-full h-12 sm:h-auto bg-slate-950 border border-slate-800 rounded-xl sm:rounded-2xl px-4 sm:px-5 py-3 sm:py-4 text-white text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all font-bold placeholder-slate-700 shadow-inner"
                       />
                     </div>
 
                     {authMode === "register" && (
                       <div>
-                        <label className="block text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 mb-2 ml-1">
-                          Display Label
+                        <label className="block text-[9px] sm:text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 mb-1.5 sm:mb-2 ml-1">
+                          Display Name
                         </label>
                         <input
                           type="text"
@@ -703,14 +703,14 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                           value={displayNameInput}
                           onChange={(e) => setDisplayNameInput(e.target.value)}
                           placeholder="Your Master Name"
-                          className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-5 py-4 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all font-bold placeholder-slate-700 shadow-inner"
+                          className="w-full h-12 sm:h-auto bg-slate-950 border border-slate-800 rounded-xl sm:rounded-2xl px-4 sm:px-5 py-3 sm:py-4 text-white text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all font-bold placeholder-slate-700 shadow-inner"
                         />
                       </div>
                     )}
 
                     <div>
-                      <label className="block text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 mb-2 ml-1">
-                        Master Seed Password
+                      <label className="block text-[9px] sm:text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 mb-1.5 sm:mb-2 ml-1">
+                        Seed Password
                       </label>
                       <div className="relative">
                         <input
@@ -719,14 +719,14 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                           value={passwordInput}
                           onChange={(e) => setPasswordInput(e.target.value)}
                           placeholder="••••••••••••"
-                          className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-5 py-4 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all font-bold placeholder-slate-700 shadow-inner"
+                          className="w-full h-12 sm:h-auto bg-slate-950 border border-slate-800 rounded-xl sm:rounded-2xl px-4 sm:px-5 py-3 sm:py-4 text-white text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all font-bold placeholder-slate-700 shadow-inner"
                         />
                         <button
                           type="button"
                           onClick={() => setShowPassword(!showPassword)}
-                          className="absolute right-5 top-1/2 -translate-y-1/2 text-slate-600 hover:text-white transition-colors"
+                          className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-600 hover:text-white transition-colors"
                         >
-                          {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                          {showPassword ? <EyeOff className="w-4 h-4 sm:w-5 sm:h-5" /> : <Eye className="w-4 h-4 sm:w-5 sm:h-5" />}
                         </button>
                       </div>
                     </div>
@@ -734,56 +734,35 @@ export const LandingPage: React.FC<LandingPageProps> = ({
 
                   <button
                     type="submit"
-                    className="w-full py-4 sm:py-5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl font-black uppercase tracking-widest text-xs sm:text-sm shadow-xl active:scale-95 transition-all mt-4"
+                    className="w-full py-4 sm:py-5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl sm:rounded-2xl font-black uppercase tracking-widest text-[11px] sm:text-sm shadow-xl active:scale-95 transition-all mt-4"
                   >
-                    {authMode === "register" ? "Confirm Registration" : "Unlock Identity"}
+                    {authMode === "register" ? "Confirm" : "Unlock Identity"}
                   </button>
-                  
-                  {authMode === "login" && hasBiometric && (
-                    <button
-                      type="button"
-                      onClick={() => handleBiometricLogin?.()}
-                      className="w-full py-4 bg-slate-900 border border-slate-700 hover:bg-slate-800 text-white rounded-2xl font-black uppercase tracking-widest text-xs sm:text-sm shadow-xl active:scale-95 transition-all flex items-center justify-center gap-2 mt-3"
-                    >
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-fingerprint"><path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4"/><path d="M15 13a5 5 0 0 0-6-1.5"/><path d="M18 16a8 8 0 0 0-11-2.5"/><path d="M9 22c-1.5-1.5-2.5-4-2.5-7a8 8 0 0 1 15-2"/><path d="M9 18v2"/><path d="M15 22v-3.5"/></svg>
-                      Use Biometric Unlock
-                    </button>
+
+                  {authMode === "login" && (
+                    <div className="pt-2">
+                      <p className="text-[10px] text-slate-500 text-center font-medium opacity-50 italic">
+                        Biometric hardware signature will activate automatically if available.
+                      </p>
+                    </div>
                   )}
                 </form>
 
                 <div className="mt-8 sm:mt-10 p-4 sm:p-6 bg-slate-950 border border-slate-800 rounded-2xl sm:rounded-3xl flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
                   <div className="min-w-0">
-                    <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Backup Recovery</p>
-                    <p className="text-[11px] text-slate-400 leading-tight">Import .vault pack or scan key QR</p>
+                    <p className="text-[11px] text-slate-400 leading-tight">Port & restore files offline seamlessly</p>
                   </div>
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => setShowQRScanner(true)}
-                      className="px-3 py-2 sm:py-2.5 bg-indigo-600/10 hover:bg-indigo-600/25 text-indigo-400 hover:text-indigo-300 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all cursor-pointer border border-indigo-500/20 text-center flex items-center gap-1.5"
+                      onClick={() => setShowRecoveryDesk(true)}
+                      className="px-4 py-2 sm:py-2.5 bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-400 hover:text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-all cursor-pointer border border-indigo-500/20 text-center flex items-center justify-center gap-1.5"
                     >
-                      <QrCode className="w-3.5 h-3.5" />
-                      Scan QR
+                      <RotateCcw className="w-3.5 h-3.5 text-indigo-400" />
+                      Open Recovery Desk
                     </button>
-                    <label className="px-4 py-2 sm:py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all cursor-pointer border border-slate-700 text-center flex items-center gap-1.5">
-                      <Upload className="w-3.5 h-3.5 text-slate-400" />
-                      Upload File
-                      <input type="file" accept=".vault" onChange={handleVaultPackImport} className="hidden" />
-                    </label>
                   </div>
                 </div>
-
-                <AnimatePresence>
-                  {showQRScanner && (
-                    <QRScannerOverlay
-                      onScan={(scannedText) => {
-                        setShowQRScanner(false);
-                        handleVaultPackImport(null as any, scannedText);
-                      }}
-                      onClose={() => setShowQRScanner(false)}
-                    />
-                  )}
-                </AnimatePresence>
 
                 <div className="mt-10 text-center">
                   <button 
@@ -796,6 +775,200 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               </div>
             </div>
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Sovereign Recovery Desk Modal */}
+      <AnimatePresence>
+        {showRecoveryDesk && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 sm:p-8">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-slate-950/85 backdrop-blur-2xl"
+              onClick={() => setShowRecoveryDesk(false)}
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 30 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 30 }}
+              className="relative w-full sm:max-w-lg h-full sm:h-auto bg-slate-900 border-0 sm:border border-slate-800 rounded-none sm:rounded-[40px] overflow-hidden shadow-none sm:shadow-[0_0_100px_rgba(0,0,0,0.5)] flex flex-col z-10 mx-auto sm:max-h-[90vh]"
+            >
+              <div className="pt-12 pb-4 px-4 sm:p-10 border-b border-white/5 sm:border-slate-800 flex items-center justify-between bg-slate-900 sm:bg-slate-900/50 sticky top-0 z-20 backdrop-blur-xl">
+                <div className="flex items-center gap-3 sm:gap-5">
+                  <div className="w-10 h-10 sm:w-14 sm:h-14 rounded-[12px] sm:rounded-[20px] bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 shrink-0 shadow-inner">
+                    <RotateCcw className="w-5 h-5 sm:w-7 sm:h-7" />
+                  </div>
+                  <div>
+                    <h3 className="text-base sm:text-xl font-black text-white uppercase tracking-tight leading-none mb-1">Recovery Hub</h3>
+                    <div className="text-[8px] sm:text-[9px] font-black text-indigo-500 uppercase tracking-[0.2em]">Disaster Restore</div>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowRecoveryDesk(false)}
+                  className="w-10 h-10 sm:w-12 sm:h-12 rounded-full sm:rounded-2xl bg-white/5 hover:bg-white/10 flex items-center justify-center text-slate-400 hover:text-white transition-all active:scale-90"
+                >
+                  <X className="w-5 h-5 sm:w-6 sm:h-6" />
+                </button>
+              </div>
+
+              <div className="flex border-b border-slate-800 p-2 sm:p-4 bg-slate-950/40 gap-1.5 sm:gap-2">
+                {[
+                  { id: "upload", label: "Pack", icon: Upload },
+                  { id: "paste", label: "Paste", icon: Globe },
+                  { id: "seed", label: "Key", icon: Fingerprint }
+                ].map((tab) => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setRecoveryTab(tab.id as any)}
+                    className={`flex-1 py-3 sm:py-4 rounded-xl sm:rounded-2xl flex flex-col items-center justify-center gap-1 sm:gap-1.5 transition-all active:scale-95 border ${
+                      recoveryTab === tab.id 
+                        ? "bg-indigo-600 text-white shadow-xl shadow-indigo-600/30 border-indigo-500" 
+                        : "text-slate-500 hover:text-slate-300 hover:bg-white/5 border-transparent"
+                    }`}
+                  >
+                    <tab.icon className="w-4 h-4 sm:w-5 sm:h-5 mb-0.5" />
+                    <span className="text-[9px] sm:text-[10px] font-black uppercase tracking-[0.1em]">{tab.label}</span>
+                  </button>
+                ))}
+              </div>
+
+              <div className="p-6 sm:p-10 overflow-y-auto max-h-[70vh] space-y-8">
+                {recoveryTab === "upload" && (
+                  <div className="space-y-6 text-center py-4">
+                    <div className="w-20 h-20 rounded-3xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 mx-auto animate-pulse">
+                      <Upload className="w-10 h-10" />
+                    </div>
+                    <div className="space-y-3">
+                      <h4 className="text-lg font-black text-white uppercase tracking-tight">Restore via .vault keypack</h4>
+                      <p className="text-xs text-slate-400 leading-relaxed max-w-sm mx-auto font-sans font-medium px-4">
+                        Select your previously exported <code className="text-indigo-300 font-black bg-indigo-500/10 px-1.5 py-0.5 rounded">.vault</code> container to re-establish your identity and re-link blocks.
+                      </p>
+                    </div>
+                    <div className="pt-4">
+                      <label className="inline-flex w-full px-8 py-5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl text-xs font-black uppercase tracking-[0.15em] transition-all cursor-pointer shadow-xl shadow-indigo-600/20 active:scale-95 items-center justify-center gap-3">
+                        <Upload className="w-5 h-5 text-white" />
+                        Select .vault Backup
+                        <input
+                          type="file"
+                          accept=".vault"
+                          onChange={(e) => {
+                            handleVaultPackImport(e);
+                            setShowRecoveryDesk(false);
+                          }}
+                          className="hidden"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                )}
+
+                {recoveryTab === "paste" && (
+                  <div className="space-y-6">
+                    <div className="space-y-3">
+                      <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Vault JSON / Base64 Ciphertext</label>
+                      <textarea
+                        value={pastedPackText}
+                        onChange={(e) => setPastedPackText(e.target.value)}
+                        placeholder='{"version": "2.0", "profile": {...}, "files": [...]}'
+                        className="w-full h-48 bg-slate-950 border-2 border-slate-800 rounded-2xl px-5 py-4 text-xs font-mono text-indigo-200 focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all placeholder:text-slate-800"
+                      />
+                    </div>
+                    <div className="flex items-start gap-3 p-4 bg-slate-950/50 border border-slate-800 rounded-2xl">
+                      <div className="p-2 bg-indigo-500/10 rounded-lg shrink-0">
+                        <Globe className="w-4 h-4 text-indigo-400" />
+                      </div>
+                      <p className="text-[10px] text-slate-500 leading-relaxed font-medium">
+                        Ideal for mobile browsers and standalone PWA environments where local file discovery might be constrained by sandbox policies.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={!pastedPackText.trim() || isProcessingRecovery}
+                      onClick={async () => {
+                        setIsProcessingRecovery(true);
+                        try {
+                          await handleVaultPackImport(null, pastedPackText);
+                          setShowRecoveryDesk(false);
+                        } catch (e) {}
+                        setIsProcessingRecovery(false);
+                      }}
+                      className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:scale-100 text-white py-5 rounded-2xl text-xs font-black uppercase tracking-[0.15em] transition-all shadow-xl shadow-indigo-600/20 active:scale-95"
+                    >
+                      {isProcessingRecovery ? "Analyzing Keypack..." : "Verify & Import Ciphertext"}
+                    </button>
+                  </div>
+                )}
+
+                {recoveryTab === "seed" && (
+                  <div className="space-y-6 text-left">
+                    <div className="p-5 bg-amber-500/5 border border-amber-500/20 rounded-[24px] flex gap-4 items-start shadow-inner">
+                      <AlertTriangle className="w-6 h-6 text-amber-500 shrink-0 mt-0.5" />
+                      <div className="space-y-1.5">
+                        <h5 className="text-[11px] font-black text-amber-500 uppercase tracking-widest">Master Key Reconstruction</h5>
+                        <p className="text-[10px] text-amber-200/50 leading-relaxed font-sans font-medium">
+                          The system will reconstruct your identity from the seed and perform a <span className="text-amber-400 font-bold uppercase">Deep BlockDAG Scan</span> to recover orphaned files automatically.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="space-y-4 font-sans">
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Username Reference</label>
+                        <input
+                          type="text"
+                          value={recoverUsername}
+                          onChange={(e) => setRecoverUsername(e.target.value)}
+                          placeholder="e.g. alice"
+                          className="w-full h-14 bg-slate-950 border-2 border-slate-800 rounded-2xl px-5 text-sm text-white focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all placeholder:text-slate-800"
+                        />
+                      </div>
+
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">12-Word Mnemonic or Master Seed</label>
+                        <textarea
+                          value={recoverMnemonic}
+                          onChange={(e) => setRecoverMnemonic(e.target.value)}
+                          placeholder="abandon ability able about above absent absorb abstract absurd abuse access account..."
+                          className="w-full h-24 bg-slate-950 border-2 border-slate-800 rounded-2xl px-5 py-4 text-xs text-white font-mono placeholder:text-slate-800 focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all"
+                        />
+                      </div>
+
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">New Unlock Password / PIN</label>
+                        <input
+                          type="password"
+                          value={recoverPin}
+                          onChange={(e) => setRecoverPin(e.target.value)}
+                          placeholder="Secure local storage context"
+                          className="w-full h-14 bg-slate-950 border-2 border-slate-800 rounded-2xl px-5 text-sm text-white focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all placeholder:text-slate-800"
+                        />
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={!recoverUsername.trim() || !recoverMnemonic.trim() || !recoverPin.trim() || isProcessingRecovery}
+                      onClick={async () => {
+                        setIsProcessingRecovery(true);
+                        try {
+                          if (handleMnemonicOrMasterKeyRecovery) {
+                            await handleMnemonicOrMasterKeyRecovery(recoverUsername, recoverMnemonic, recoverPin);
+                            setShowRecoveryDesk(false);
+                          }
+                        } catch (e) {}
+                        setIsProcessingRecovery(false);
+                      }}
+                      className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:scale-100 text-white py-5 rounded-2xl text-xs font-black uppercase tracking-[0.15em] transition-all shadow-xl shadow-indigo-600/20 active:scale-95"
+                    >
+                      {isProcessingRecovery ? "Deriving Credentials..." : "Reconstruct & Scan BlockDAG"}
+                    </button>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </div>
         )}
       </AnimatePresence>
     </div>

@@ -77,7 +77,7 @@ export function ShareRequestInbox({ requests, onAccept, onReject }: Props) {
               <div className="flex flex-col sm:flex-row justify-between items-start gap-4">
                 <div className="flex-1 text-left">
                   <div className="font-bold text-white text-base mb-1">{req.fileName}</div>
-                  <div className="text-xs text-indigo-200 mb-2">From: @{req.senderName}</div>
+                  <div className="text-xs text-indigo-300 mb-2">From: @{req.senderName}</div>
                   
                   {req.note && (
                     <div className="text-xs text-indigo-200/80 bg-indigo-950/60 p-2.5 rounded-lg border border-indigo-500/10 mb-3 italic">
@@ -85,7 +85,7 @@ export function ShareRequestInbox({ requests, onAccept, onReject }: Props) {
                     </div>
                   )}
 
-                  <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-[10px] font-mono text-indigo-300">
+                  <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-[10px] font-mono text-indigo-400">
                     <div className="flex items-center gap-1.5">
                       {req.integrityHash ? <ShieldCheck className="w-4 h-4 text-emerald-400" /> : <ShieldAlert className="w-4 h-4 text-red-500" />}
                       <span className="break-all opacity-80">Hash: {req.integrityHash || 'No integrity hash provided'}</span>

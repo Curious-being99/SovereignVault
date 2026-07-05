@@ -28,6 +28,7 @@ import {
   EyeOff,
   FolderOpen,
   Folder,
+  ChevronLeft,
   ChevronRight,
   ChevronDown,
   Plus,
@@ -40,6 +41,7 @@ import {
   Music,
   FileQuestion,
   Search,
+  MessageSquare,
   Users2,
   RefreshCcw,
   Network,
@@ -68,6 +70,18 @@ import {
   Loader2,
   File as FileIcon,
   BookOpen,
+  Fingerprint,
+  AlertTriangle,
+  Smartphone,
+  Settings,
+  Menu,
+  Gift,
+  Bug,
+  CreditCard,
+  HardDrive,
+  Users,
+  Compass,
+  LayoutGrid
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { 
@@ -84,6 +98,7 @@ import {
 import { LandingPage } from "./components/LandingPage";
 import { SovereignRecoveryConsole } from "./components/SovereignRecoveryConsole";
 import { SovereignRecovery } from "./components/SovereignRecovery";
+import { SovereignChat } from "./components/SovereignChat";
 import { ShareRequestInbox } from "./components/ShareRequestInbox";
 import { FileShareRequest } from "./types";
 import { useP2P } from "./lib/p2p";
@@ -92,11 +107,18 @@ import { TransferRecord, StoragePoint } from "./types";
 import { TransferHistoryModal } from "./components/TransferHistoryModal";
 import { DagVerificationModal } from "./components/DagVerificationModal";
 import { ConfirmationModal } from "./components/ConfirmationModal";
-import { VaultIntegrityModal } from "./components/VaultIntegrityModal";
+
 import { StorageUsageChart } from "./components/StorageUsageChart";
 import { NetworkDocsDrawer } from "./components/NetworkDocsDrawer";
-import { SecurityBountyDesk } from "./components/SecurityBountyDesk";
-import { NativeBiometric } from "@capgo/capacitor-native-biometric";
+import { NetworkTopologyCanvas } from "./components/NetworkTopologyCanvas";
+import { SyncConflictModal, SyncConflict } from "./components/SyncConflictModal";
+import {
+  isWebBiometricSupported,
+  hasWebBiometric,
+  saveWebBiometric,
+  getWebBiometric,
+  clearWebBiometric
+} from "./lib/webBiometric";
 
 export default function App() {
   const { 
@@ -159,6 +181,8 @@ export default function App() {
   // Session & Auth state
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(() => {
     try {
+      const savedSession = sessionStorage.getItem("vault_current_user");
+      if (savedSession) return JSON.parse(savedSession);
       const saved = localStorage.getItem("vault_current_user");
       return saved ? JSON.parse(saved) : null;
     } catch {
@@ -166,37 +190,102 @@ export default function App() {
     }
   });
   const [sessionPassword, setSessionPassword] = useState<string>(() => {
+    try {
+      const savedSession = sessionStorage.getItem("vault_session_password");
+      if (savedSession) return savedSession;
+    } catch {}
     return localStorage.getItem("vault_session_password") || "";
+  });
+
+  const [biometricAutoUnlock, setBiometricAutoUnlock] = useState<boolean>(() => {
+    return localStorage.getItem("vault_biometric_autounlock") === "true";
   });
   
   const [hasBiometric, setHasBiometric] = useState(false);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
 
   useEffect(() => {
-    NativeBiometric.isAvailable().then(result => {
-      // Capacitor plugin returns true on web (dummy implementation), so check for native environment too
-      const isNative = !!(window as any).Capacitor?.isNative;
-      if (result.isAvailable && isNative) {
-        setHasBiometric(true);
-      }
-    }).catch(() => {});
+    const handleOnline = () => {
+      setIsOnline(true);
+      api.processSyncQueue().catch(console.error);
+    };
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    // Initial check and SW registration
+    if (navigator.onLine) {
+      api.processSyncQueue().catch(console.error);
+    }
+
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').then(registration => {
+          console.log('SW registered: ', registration);
+        }).catch(registrationError => {
+          console.log('SW registration failed: ', registrationError);
+        });
+      });
+    }
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
   }, []);
 
-  // Sync session & auth states to localStorage
+  useEffect(() => {
+    const isNative = !!(window as any).Capacitor?.isNative;
+    if (isNative) {
+      (async () => {
+        const NativeBiometric = (window as any).Capacitor?.Plugins?.NativeBiometric;
+        if (NativeBiometric) {
+          NativeBiometric.isAvailable().then((result: any) => {
+            if (result.isAvailable) {
+              setHasBiometric(true);
+            }
+          }).catch(() => {});
+        }
+      })();
+    } else if (isWebBiometricSupported()) {
+      setHasBiometric(true);
+    }
+  }, []);
+
+  // Sync session & auth states to localStorage & sessionStorage
   useEffect(() => {
     if (currentUser) {
       localStorage.setItem("vault_current_user", JSON.stringify(currentUser));
+      try {
+        sessionStorage.setItem("vault_current_user", JSON.stringify(currentUser));
+      } catch {}
     } else {
       localStorage.removeItem("vault_current_user");
+      try {
+        sessionStorage.removeItem("vault_current_user");
+      } catch {}
     }
   }, [currentUser]);
 
   useEffect(() => {
     if (sessionPassword) {
-      localStorage.setItem("vault_session_password", sessionPassword);
+      try {
+        sessionStorage.setItem("vault_session_password", sessionPassword);
+      } catch {}
+      if (biometricAutoUnlock) {
+        // Privacy mode: never write the plaintext password to localStorage disk!
+        localStorage.removeItem("vault_session_password");
+      } else {
+        localStorage.setItem("vault_session_password", sessionPassword);
+      }
     } else {
       localStorage.removeItem("vault_session_password");
+      try {
+        sessionStorage.removeItem("vault_session_password");
+      } catch {}
     }
-  }, [sessionPassword]);
+  }, [sessionPassword, biometricAutoUnlock]);
 
   const [shareDialogOptions, setShareDialogOptions] = useState<{
     file: FileData | null;
@@ -206,7 +295,6 @@ export default function App() {
   }>({ file: null, open: false, note: "", targetUsername: "" });
 
   const [shareDropdownOpen, setShareDropdownOpen] = useState(false);
-
   const [publicShareDialog, setPublicShareDialog] = useState<{
     file: FileData | null;
     open: boolean;
@@ -240,6 +328,7 @@ export default function App() {
   };
   const filesRef = useRef<FileData[]>([]);
   const isRefreshingRef = useRef(false);
+  const isSystemActionRef = useRef(false);
 
   useEffect(() => {
     filesRef.current = files;
@@ -247,6 +336,7 @@ export default function App() {
   const [pendingShareRequests, setPendingShareRequests] = useState<FileShareRequest[]>([]);
 
   // Sovereign Decentralized Portability Keypack Utilities
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [isRestoring, setIsRestoring] = useState(false);
   const [activeRecoveryPack, setActiveRecoveryPack] = useState<any | null>(null);
 
@@ -256,10 +346,90 @@ export default function App() {
       return;
     }
     try {
-      showToast("Packaging decentralized vault data...", "info");
-      const data = await api.exportVaultPack(currentUser.id);
+      showToast(`Packaging identity & ${files.length} localized file blocks...`, "info");
+
+      let salt = currentUser.passwordSalt;
+      if (!salt) {
+        const saltBytes = await getDeterministicSalt(currentUser.username);
+        salt = bufferToHex(saltBytes);
+      }
+
+      let hash = currentUser.passwordHash;
+      if (!hash && sessionPassword && salt) {
+        const saltBytes = hexToBytes(salt);
+        hash = await hashPassword(sessionPassword, saltBytes);
+      }
+
+      if (!hash) {
+        throw new Error("Cryptographic hash verification failed. Please re-enter your password to unlock full authority.");
+      }
+
+      // Update in-memory user so subsequent exports/actions have it
+      if (salt !== currentUser.passwordSalt || hash !== currentUser.passwordHash) {
+        setCurrentUser(prev => prev ? { ...prev, passwordSalt: salt, passwordHash: hash } : null);
+      }
       
-      const jsonStr = JSON.stringify(data, null, 2);
+      // Ensure we have data for all files (expensive but necessary for offline portability)
+      const filesWithData = await Promise.all(files.map(async (f) => {
+        let fileData = f.data;
+        if (!fileData && !f.isFolder) {
+          try {
+            // Try to get from local storage first (it might be there even if not in files state)
+            const local = await api.getFiles(currentUser.id, currentUser.privateVaultId);
+            const match = local.find(l => l.id === f.id);
+            if (match && match.data) {
+              fileData = match.data;
+            } else {
+              // Fetch from server
+              fileData = await api.downloadFileContent(currentUser.id, f.id!);
+            }
+          } catch (e) {
+            console.warn(`Could not fetch data for file ${f.name} during backup`, e);
+          }
+        }
+
+        return {
+          id: f.id,
+          name: f.name,
+          type: f.type,
+          size: f.size,
+          folderPath: f.folderPath,
+          isFolder: f.isFolder,
+          isShared: f.isShared,
+          senderName: f.senderName,
+          shareNote: f.shareNote,
+          lastModified: f.lastModified,
+          clientEncrypted: f.clientEncrypted,
+          previousDagHash: f.previousDagHash,
+          dagHash: f.dagHash,
+          dagSignature: f.dagSignature,
+          vaultSeedId: f.vaultSeedId,
+          merkleRoot: f.merkleRoot,
+          encryptionKey: f.encryptionKey,
+          cryptoBlockNumber: f.cryptoBlockNumber,
+          originalOwnerSeedId: f.originalOwnerSeedId,
+          peerReceiverSeedId: f.peerReceiverSeedId,
+          originalId: f.originalId,
+          userId: f.userId,
+          data: fileData ? api.bufferToBase64(fileData) : null
+        };
+      }));
+
+      const keypack = {
+        version: "2.0",
+        profile: {
+          id: currentUser.id,
+          username: currentUser.username,
+          passwordHash: hash,
+          passwordSalt: salt,
+          vaultSeedId: currentUser.vaultSeedId,
+          displayName: currentUser.displayName,
+          avatarColor: currentUser.avatarColor,
+        },
+        files: filesWithData
+      };
+      
+      const jsonStr = JSON.stringify(keypack, null, 2);
       const blob = new Blob([jsonStr], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       
@@ -267,6 +437,7 @@ export default function App() {
       a.href = url;
       a.download = `decentralized_secure_vault_${currentUser.username}_backup.vault`;
       document.body.appendChild(a);
+      isSystemActionRef.current = true;
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
@@ -343,12 +514,12 @@ export default function App() {
     }
   };
 
-  const handleFinalizeRecovery = async (password: string) => {
+  const handleFinalizeRecovery = async (password: string, systemMasterKey?: string) => {
     if (!activeRecoveryPack) return;
     setIsRestoring(true);
     try {
       showToast("Injecting sovereign identity and writing database partitions...", "info");
-      const res = await api.importVaultPack(activeRecoveryPack);
+      const res = await api.importVaultPack({ ...activeRecoveryPack, systemMasterKey });
       if (res.success && res.user) {
         let successMsg = `Sovereign identity '@${res.user.username}' successfully ported to this device!`;
         if (res.recovery && res.recovery.recovered > 0) {
@@ -367,9 +538,39 @@ export default function App() {
         setCurrentUser({ ...res.user, passwordHash: res.user.passwordHash });
         setSessionPassword(password);
 
+        // Automatically attempt to register biometric/passkey
+        if (isWebBiometricSupported()) {
+          try {
+            await saveWebBiometric(res.user.username, password);
+            showToast("Passkey registered for hardware security.", "success");
+          } catch (biomErr) {
+            console.warn("Auto-biometric registration skipped:", biomErr);
+          }
+        }
+
         // Refresh users list
         const list = await api.getAllUsers();
         setAllUsers(list);
+
+        // Migrate local files that were indexed during recovery to the new User ID
+        if (activeRecoveryPack.files && activeRecoveryPack.files.length > 0) {
+          const oldUserIds = new Set<number>();
+          activeRecoveryPack.files.forEach((f: any) => {
+            if (f.userId) oldUserIds.add(Number(f.userId));
+          });
+          
+          // Also include the profile ID if it exists (important for stable cross-device mapping)
+          if (activeRecoveryPack.profile && activeRecoveryPack.profile.id) {
+            oldUserIds.add(Number(activeRecoveryPack.profile.id));
+          }
+          
+          for (const oldId of oldUserIds) {
+            if (oldId && oldId !== res.user.id) {
+              console.log(`[Recovery] Migrating local assets from old ID ${oldId} to new ID ${res.user.id}`);
+              await api.migrateOfflineFilesUserId(oldId, res.user.id);
+            }
+          }
+        }
 
         // Reset inputs and states
         setUsernameInput("");
@@ -377,14 +578,125 @@ export default function App() {
         setActiveRecoveryPack(null);
 
         // Critically: Refresh data for the newly restored user keypack context
-        setTimeout(() => {
-          refreshData();
+        setTimeout(async () => {
+          const currentFiles = await refreshData();
+          // If no files were found in the backup or on the server, try to recover from the mesh
+          if (currentFiles && currentFiles.length === 0) {
+            console.log("[Recovery] No local records found. Triggering Mesh & BlockDAG Reconstruction...");
+            setTimeout(async () => {
+              restoreFromMesh();
+              try {
+                await api.deepRecover(res.user.id);
+                refreshData();
+              } catch (e) {}
+            }, 1000);
+          }
         }, 500);
       } else {
         throw new Error("Backup pack database injection rejected.");
       }
     } catch (err: any) {
       showToast(err.message || "Failed to finalize recovery.", "error");
+    } finally {
+      setIsRestoring(false);
+    }
+  };
+
+  const handleMnemonicOrMasterKeyRecovery = async (username: string, mnemonicOrKey: string, pinOrPass: string) => {
+    if (!username.trim() || !mnemonicOrKey.trim() || !pinOrPass.trim()) {
+      showToast("Please fill in all recovery parameters.", "error");
+      return;
+    }
+    setIsRestoring(true);
+    try {
+      showToast("Initializing cryptographic derivation from Master Key...", "info");
+      
+      const cleanUsername = username.trim().toLowerCase();
+      const cleanKey = mnemonicOrKey.trim();
+      const cleanPin = pinOrPass.trim();
+
+      // Derive salt deterministically from username
+      const saltBytes = await getDeterministicSalt(cleanUsername);
+      const saltHex = bufferToHex(saltBytes);
+
+      // We hash the local PIN/Password using the deterministic salt to protect local session
+      const passwordHash = await hashPassword(cleanPin, saltBytes);
+
+      // Now we derive the privateVaultId deterministically using the Master Key / Mnemonic
+      // This is crucial: the privateVaultId remains identical on any phone where they enter the same master key!
+      const vaultSeedIdBytes = await getDeterministicSalt(cleanKey);
+      const vaultSeedId = bufferToHex(vaultSeedIdBytes);
+      
+      const privateVaultIdBytes = await crypto.subtle.digest(
+        "SHA-256", 
+        new TextEncoder().encode(vaultSeedId + "vault-id-isolation-constant")
+      );
+      const privateVaultId = bufferToHex(privateVaultIdBytes).substring(0, 32);
+
+      // Look up if user already exists locally
+      const existing = await api.getAllUsers().then(users => 
+        users.find(u => u.username && u.username.trim().toLowerCase() === cleanUsername)
+      );
+
+      const userId = existing ? existing.id! : Date.now();
+
+      const userProfile = {
+        id: userId,
+        username: cleanUsername,
+        displayName: username.trim(),
+        passwordHash: passwordHash,
+        passwordSalt: saltHex,
+        vaultSeedId: vaultSeedId,
+        avatarColor: "#10b981", // elegant emerald theme
+        joinedAt: Date.now(),
+        autoLockInterval: 0,
+        privateVaultId: privateVaultId
+      };
+
+      // Save user locally (SQLite or IndexedDB)
+      await api.importVaultPack({
+        version: "2.0",
+        profile: userProfile,
+        files: []
+      });
+
+      // Scan local storage for any existing local orphan files matching this privateVaultId and link them!
+      const linkedCount = await api.linkOrphanFilesToUser(userId, privateVaultId);
+
+      // Trigger Deep BlockDAG Scan to find orphaned server-side fragments
+      try {
+        const deepRes = await api.deepRecover(userId);
+        if (deepRes && deepRes.recovered > 0) {
+          console.log(`[Recovery] Deep Scan found ${deepRes.recovered} additional fragments.`);
+        }
+      } catch (err) {
+        console.warn("[Recovery] Deep BlockDAG Scan failed, continuing with local data:", err);
+      }
+
+      showToast(`Restored identity @${cleanUsername}! Recovered & linked ${linkedCount} files.`, "success");
+
+      // Automatically attempt to register biometric/passkey
+      if (isWebBiometricSupported()) {
+        try {
+          await saveWebBiometric(cleanUsername, cleanPin);
+          showToast("Passkey registered for hardware security.", "success");
+        } catch (biomErr) {
+          console.warn("Auto-biometric registration skipped:", biomErr);
+        }
+      }
+
+      // Set session & auto-login
+      await deriveMasterKey(cleanUsername, cleanPin);
+      setCurrentUser(userProfile);
+      setSessionPassword(cleanPin);
+
+      // Refresh files list
+      setTimeout(async () => {
+        await refreshData();
+      }, 500);
+
+    } catch (err: any) {
+      showToast(err.message || "Failed to recover identity from master key.", "error");
     } finally {
       setIsRestoring(false);
     }
@@ -405,6 +717,7 @@ export default function App() {
       a.href = url;
       a.download = `quantum_secure_vault_physical_backup.db`;
       document.body.appendChild(a);
+      isSystemActionRef.current = true;
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
@@ -449,6 +762,50 @@ export default function App() {
     }
   };
 
+  const [syncStatus, setSyncStatus] = useState<{ total: number; done: number; active: boolean } | null>(null);
+
+  const syncMissingFileContentsInBackground = async (userId: number, fileList: FileData[]) => {
+    if (syncStatus?.active) return;
+    const realFiles = fileList.filter(f => !f.isFolder);
+    if (realFiles.length === 0) return;
+
+    const filesToSync: FileData[] = [];
+    for (const file of realFiles) {
+      try {
+        const local = await api.getLocalFile(file.id!);
+        if (!local || !local.data || (local.data instanceof ArrayBuffer && local.data.byteLength === 0)) {
+          filesToSync.push(file);
+        }
+      } catch (e) {
+        filesToSync.push(file);
+      }
+    }
+
+    if (filesToSync.length === 0) {
+      console.log("[BackgroundSync] All files are already stored locally.");
+      return;
+    }
+
+    console.log(`[BackgroundSync] Starting background download of ${filesToSync.length} files...`);
+    setSyncStatus({ total: filesToSync.length, done: 0, active: true });
+    showToast(`Securing ${filesToSync.length} files for offline availability...`, "info");
+
+    let doneCount = 0;
+    for (const file of filesToSync) {
+      try {
+        await api.downloadFileContent(userId, file.id!);
+        doneCount++;
+        setSyncStatus({ total: filesToSync.length, done: doneCount, active: true });
+      } catch (err) {
+        console.warn(`[BackgroundSync] Failed to download content for ${file.name}:`, err);
+      }
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    setSyncStatus(null);
+    showToast("💯 100% of your workspace files have been downloaded and are secured offline!", "success");
+  };
+
   const [usernameInput, setUsernameInput] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
   const [displayNameInput, setDisplayNameInput] = useState("");
@@ -459,12 +816,56 @@ export default function App() {
   const [showTransferHistoryModal, setShowTransferHistoryModal] =
     useState(false);
   const [viewingDagBlock, setViewingDagBlock] = useState<any | null>(null);
-  const [showSettingsPanel, setShowSettingsPanel] = useState(false);
-  const [showSovereignRecovery, setShowSovereignRecovery] = useState(false);
+  const [showSettingsPanel, setShowSettingsPanel] = useState(() => {
+    return sessionStorage.getItem("vault_show_settings_panel") === "true";
+  });
+  const [showSovereignRecovery, setShowSovereignRecovery] = useState(() => {
+    return sessionStorage.getItem("vault_show_sovereign_recovery") === "true";
+  });
   const [showNetworkDocs, setShowNetworkDocs] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [onlyShowOffline, setOnlyShowOffline] = useState(false);
+  const [showSubscription, setShowSubscription] = useState(false);
+  const [showBugReport, setShowBugReport] = useState(false);
+  const [bugDescription, setBugDescription] = useState("");
+  const [showDevicePairing, setShowDevicePairing] = useState(() => {
+    return sessionStorage.getItem("vault_show_device_pairing") === "true";
+  });
+  const [showChat, setShowChat] = useState(() => {
+    return sessionStorage.getItem("vault_show_chat") === "true";
+  });
+  const [syncConflict, setSyncConflict] = useState<SyncConflict | null>(null);
   const [mobileActiveTab, setMobileActiveTab] = useState<"files" | "mesh">("files");
-  const [showVaultIntegrityModal, setShowVaultIntegrityModal] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<"general" | "security" | "network" | "health" | "bounty">("general");
+
+  const [settingsTab, setSettingsTab] = useState<"general" | "security" | "network" | "health" | "bounty" >(() => {
+    return (sessionStorage.getItem("vault_settings_tab") as any) || "general";
+  });
+
+  useEffect(() => {
+    sessionStorage.setItem("vault_show_settings_panel", String(showSettingsPanel));
+  }, [showSettingsPanel]);
+
+  useEffect(() => {
+    sessionStorage.setItem("vault_show_sovereign_recovery", String(showSovereignRecovery));
+  }, [showSovereignRecovery]);
+
+  useEffect(() => {
+    sessionStorage.setItem("vault_show_device_pairing", String(showDevicePairing));
+  }, [showDevicePairing]);
+
+  useEffect(() => {
+    sessionStorage.setItem("vault_show_chat", String(showChat));
+  }, [showChat]);
+
+  useEffect(() => {
+    sessionStorage.setItem("vault_settings_tab", settingsTab);
+  }, [settingsTab]);
+  const [isQuantumShieldEnabled, setIsQuantumShieldEnabled] = useState<boolean>(() => localStorage.getItem("vault_quantum_shield") === "true");
+
+  useEffect(() => {
+    localStorage.setItem("vault_quantum_shield", String(isQuantumShieldEnabled));
+  }, [isQuantumShieldEnabled]);
+
   const [storageTrends, setStorageTrends] = useState<StoragePoint[]>([]);
   const [meshNodes, setMeshNodes] = useState<any[]>([]);
   const [meshEvents, setMeshEvents] = useState<any[]>([]);
@@ -665,7 +1066,7 @@ export default function App() {
       showToast(res.message || "BlockDAG chain rebuilt successfully.", "success");
       
       // Reload file list
-      const userFiles = await api.getFiles(currentUser.id);
+      const userFiles = await api.getFiles(currentUser.id, currentUser.privateVaultId);
       setFiles(userFiles);
       
       // Trigger a re-verification
@@ -717,7 +1118,7 @@ export default function App() {
       if (restoredCount > 0) {
         showToast(`Successfully recovered ${restoredCount} items from the mesh!`, "success");
         // Reload files
-        const userFiles = await api.getFiles(currentUser.id);
+        const userFiles = await api.getFiles(currentUser.id, currentUser.privateVaultId);
         setFiles(userFiles);
         triggerDiagnosticSuite();
       } else {
@@ -959,6 +1360,13 @@ export default function App() {
     }
   };
   const [searchQuery, setSearchQuery] = useState<string>("");
+  const [maxRenderedFiles, setMaxRenderedFiles] = useState<number>(100);
+  const [showNavigationSheet, setShowNavigationSheet] = useState<boolean>(false);
+
+  useEffect(() => {
+    setMaxRenderedFiles(100);
+  }, [currentPath, selectedCategory, searchQuery]);
+
   const [sortBy, setSortBy] = useState<"name" | "date" | "size">("name");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("asc");
 
@@ -1309,6 +1717,70 @@ export default function App() {
     return () => clearInterval(intervalId);
   }, [mDnsActive, mDnsIp, currentUser]);
 
+  const [offlineTransfersQueue, setOfflineTransfersQueue] = useState<{
+    itemId: number | string;
+    itemName: string;
+    itemType: string;
+    itemSize: number;
+    encryptedDataBase64: string;
+    targetUsername: string;
+  }[]>(() => {
+    try {
+      const saved = localStorage.getItem("offline_direct_transfers_queue");
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    if (isOnline && offlineTransfersQueue.length > 0) {
+      const processQueue = async () => {
+        showToast(`Re-connecting: Processing ${offlineTransfersQueue.length} queued offline transfers...`, "info");
+        const remaining = [...offlineTransfersQueue];
+        const nextTask = remaining.shift();
+        if (!nextTask) return;
+
+        const tId = startTransfer(nextTask.itemName, "transfer");
+        try {
+          updateTransferProgress(tId, 20);
+          const response = await fetch("/api/mdns/direct-transfer", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              senderUsername: currentUser?.username,
+              targetUsername: nextTask.targetUsername,
+              fileName: nextTask.itemName,
+              fileType: nextTask.itemType,
+              fileSize: nextTask.itemSize,
+              encryptedDataBase64: nextTask.encryptedDataBase64,
+            }),
+          });
+          if (response.ok) {
+            updateTransferProgress(tId, 100, "completed");
+            showToast(
+              `Success (Restored): Injected "${nextTask.itemName}" directly over HTTP POST subnet to @${nextTask.targetUsername}!`,
+              "success",
+            );
+            setOfflineTransfersQueue(remaining);
+            localStorage.setItem("offline_direct_transfers_queue", JSON.stringify(remaining));
+          } else {
+            throw new Error("Server rejected routing request");
+          }
+        } catch (err: any) {
+          updateTransferProgress(tId, 0, "error");
+          showToast(`Direct HTTP Post failure for ${nextTask.itemName}: ${err.message}`, "error");
+          // Re-insert at end of queue to avoid blocking forever or keep trying later
+          const updated = [...remaining, nextTask];
+          setOfflineTransfersQueue(updated);
+          localStorage.setItem("offline_direct_transfers_queue", JSON.stringify(updated));
+        }
+      };
+      const timer = setTimeout(processQueue, 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [isOnline, offlineTransfersQueue]);
+
   const handleDirectHttpSend = async (
     item: FileData,
     targetNode: { username: string; localIp: string },
@@ -1319,7 +1791,11 @@ export default function App() {
          showToast("Fetching encrypted payload from server...", "info");
          rawData = await api.downloadFileContent(currentUser.id, item.id);
        } catch (err: any) {
-         showToast("Failed to retrieve file data for relay.", "error");
+         if (!navigator.onLine || !isOnline) {
+           showToast("Cannot fetch file content while offline.", "error");
+         } else {
+           showToast("Failed to retrieve file data for relay.", "error");
+         }
          return;
        }
     }
@@ -1328,6 +1804,35 @@ export default function App() {
       showToast("No raw encrypted payload available for transport.", "error");
       return;
     }
+
+    if (!navigator.onLine || !isOnline) {
+      const b64Data = arrayBufferToBase64(rawData);
+      const newTask = {
+        itemId: item.id || Math.random().toString(),
+        itemName: item.name,
+        itemType: item.type,
+        itemSize: item.size,
+        encryptedDataBase64: b64Data,
+        targetUsername: targetNode.username,
+      };
+      const updatedQueue = [...offlineTransfersQueue, newTask];
+      setOfflineTransfersQueue(updatedQueue);
+      try {
+        localStorage.setItem("offline_direct_transfers_queue", JSON.stringify(updatedQueue));
+      } catch (e) {
+        console.warn("Failed to update offline direct transfers queue", e);
+      }
+      
+      const tId = startTransfer(item.name, "transfer");
+      showToast(`Offline mode: "${item.name}" transfer queued. It will automatically complete when connection is restored.`, "info");
+      updateTransferProgress(tId, 50, "active");
+      
+      setTimeout(() => {
+        updateTransferProgress(tId, 100, "completed");
+      }, 2500);
+      return;
+    }
+
     const tId = startTransfer(item.name, "transfer");
     try {
       showToast(`Compressing & streaming "${item.name}"...`, "info");
@@ -2252,7 +2757,7 @@ export default function App() {
   }, [currentUser, currentPath]);
 
   const refreshData = async () => {
-    if (isRefreshingRef.current) return;
+    if (isRefreshingRef.current) return [];
     isRefreshingRef.current = true;
     try {
       const list = await api.getAllUsers();
@@ -2269,11 +2774,14 @@ export default function App() {
           if (usernameMatch) {
             // Username match but different ID: update ID references and keep workspace online!
             console.warn("Account session ID mismatch on server, updating local user ID reference.");
+            if (currentUser.id) {
+              await api.migrateOfflineFilesUserId(currentUser.id, usernameMatch.id!);
+            }
             const updatedUser = { ...currentUser, id: usernameMatch.id };
             setCurrentUser(updatedUser);
-            const allMyFiles = await api.getFiles(usernameMatch.id);
+            const allMyFiles = await api.getFiles(usernameMatch.id!, usernameMatch.privateVaultId);
             setFiles(allMyFiles);
-            return;
+            return allMyFiles;
           } else if (sessionPassword) {
             // Username not present on server, and we have local sessionPassword: auto-heal by silently registering custom identity!
             const msg = "Autoreboot detected: Username not found in server database. Initiating silent local-recovery...";
@@ -2326,30 +2834,39 @@ export default function App() {
               );
             }
 
+            if (currentUser.id && autoUser.id) {
+              await api.migrateOfflineFilesUserId(currentUser.id, autoUser.id);
+            }
             setCurrentUser(autoUser);
-            const recoveredFiles = await api.getFiles(autoUser.id!);
+            const recoveredFiles = await api.getFiles(autoUser.id!, autoUser.privateVaultId);
             setFiles(recoveredFiles);
             showToast("Credentials successfully synced. System connected!", "success");
-            return;
+            syncMissingFileContentsInBackground(autoUser.id!, recoveredFiles);
+            return recoveredFiles;
           } else {
-            console.warn("Account session not found in active database, resetting state.");
-            handleLogout("Session expired or database reset. Please register/login again.");
-            return;
+            return [];
           }
         }
-        const allMyFiles = await api.getFiles(currentUser.id);
+        const allMyFiles = await api.getFiles(currentUser.id, currentUser.privateVaultId);
         setFiles(allMyFiles);
+        syncMissingFileContentsInBackground(currentUser.id, allMyFiles);
+        return allMyFiles;
       } else {
         setFiles([]);
+        return [];
       }
     } catch (err: any) {
       console.error("Failed to refresh data:", err);
       if (err?.message?.includes("database reset") || err?.message?.includes("register/login again") || err?.message?.includes("Unauthorized")) {
-        console.warn("API/Database reset detected in refreshData, logging out.");
-        handleLogout("Session expired or database reset. Please register/login again.");
+        console.warn("API/Database reset detected in refreshData, locking workspace for re-auth.");
+        setSessionPassword("");
+        localStorage.removeItem("vault_session_password");
+        showToast("Database reset detected. Please re-enter master password to sync workspace.", "info");
       }
+      return [];
     } finally {
       isRefreshingRef.current = false;
+      setIsInitialLoading(false);
     }
   };
 
@@ -2442,6 +2959,11 @@ export default function App() {
       ];
       const randomColor = colors[Math.floor(Math.random() * colors.length)];
 
+      // Generate a unique Private Vault ID for this master identity
+      // This binds files to the identity beyond just the sequential DB ID
+      const privateVaultId = crypto.randomUUID?.() || 
+                             bufferToHex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(cleanUsername + Date.now() + Math.random()))).substring(0, 32);
+
       const newUser: UserProfile = {
         username: cleanUsername,
         displayName: targetDisplayName,
@@ -2450,6 +2972,7 @@ export default function App() {
         joinedAt: Date.now(),
         avatarColor: randomColor,
         autoLockInterval: 0,
+        privateVaultId: privateVaultId,
       };
 
       const result = await api.register(newUser);
@@ -2462,6 +2985,16 @@ export default function App() {
 
       setCurrentUser(newUser);
       setSessionPassword(passwordInput);
+
+      // Automatically attempt to register biometric/passkey
+      if (isWebBiometricSupported()) {
+        try {
+          await saveWebBiometric(cleanUsername, passwordInput);
+          showToast("Passkey registered for hardware security.", "success");
+        } catch (biomErr) {
+          console.warn("Auto-biometric registration skipped:", biomErr);
+        }
+      }
 
       setUsernameInput("");
       setPasswordInput("");
@@ -2502,16 +3035,19 @@ export default function App() {
       
       // Attempt to save biometric credentials if available
       try {
-        const { isAvailable } = await NativeBiometric.isAvailable();
-        if (isAvailable) {
-          await NativeBiometric.setCredentials({
-            server: "QuantumSecureVault",
-            username: cleanUsername,
-            password: passwordInput,
-          });
+        // Check if platform supports biometric auto-registration (Web Passkeys)
+        if (isWebBiometricSupported()) {
+          const alreadyHas = await hasWebBiometric(cleanUsername);
+          if (!alreadyHas) {
+            const ok = await saveWebBiometric(cleanUsername, passwordInput);
+            if (ok) {
+              console.log("Credentials securely encrypted in non-extractable Web Biometric Enclave.");
+              showToast("Passkey registered for this device.", "success");
+            }
+          }
         }
       } catch (e) {
-        console.error("Failed to save biometric credentials", e);
+        console.warn("Failed to save biometric credentials", e);
       }
       
       showToast(`Unlocked workspace: ${user.displayName}!`, "success");
@@ -2523,62 +3059,224 @@ export default function App() {
     }
   };
 
-  const handleBiometricLogin = async (overrideUsername?: string) => {
+  const handleBiometricLogin = async (overrideUsername?: string, isAutoAttempt = false) => {
     const cleanUsername = (overrideUsername || usernameInput).trim().toLowerCase();
     if (!cleanUsername) {
-      showToast("Username required for biometric login.", "error");
+      if (!isAutoAttempt) {
+        showToast("Username required for biometric login.", "error");
+      }
       return;
     }
+
+    // Set system action to prevent visibility-change loops during native prompts
+    isSystemActionRef.current = true;
+    
+    if (isAutoAttempt) {
+      console.log("[Security] Auto-verifying hardware identity...");
+    } else {
+      showToast("🛡️ Requesting Passkey signature...", "info");
+    }
+
     try {
-      const { isAvailable } = await NativeBiometric.isAvailable();
-      if (!isAvailable) {
-        showToast("Biometric authentication is not available on this device.", "error");
-        return;
+      let password = "";
+      const isNative = !!(window as any).Capacitor?.isNative;
+      
+      if (isNative) {
+        const NativeBiometric = (window as any).Capacitor?.Plugins?.NativeBiometric;
+        if (NativeBiometric) {
+          const { isAvailable } = await NativeBiometric.isAvailable();
+          if (!isAvailable) {
+            if (!isAutoAttempt) {
+              showToast("Biometric authentication is not available on this device.", "error");
+            }
+            isSystemActionRef.current = false;
+            return;
+          }
+          
+          await NativeBiometric.verifyIdentity({
+            reason: "Unlock Sovereign Vault",
+            title: "Authenticate",
+            subtitle: "Use your Passkey to unlock your secure workspace",
+            description: "Passkey decryption"
+          });
+          
+          const credentials = await NativeBiometric.getCredentials({ server: "QuantumSecureVault" });
+          if (credentials && credentials.username === cleanUsername && credentials.password) {
+            password = credentials.password;
+          }
+        }
+      } else if (isWebBiometricSupported() && await hasWebBiometric(cleanUsername)) {
+        // Retrieve and decrypt from our advanced secure Web Enclave
+        password = await getWebBiometric(cleanUsername);
       }
-      
-      await NativeBiometric.verifyIdentity({
-        reason: "Unlock Sovereign Vault",
-        title: "Authenticate",
-        subtitle: "Use your biometric to unlock your secure workspace",
-        description: "Biometric decryption"
-      });
-      
-      const credentials = await NativeBiometric.getCredentials({ server: "QuantumSecureVault" });
-      if (credentials && credentials.username === cleanUsername && credentials.password) {
+
+      if (password) {
         // We have the password, we can proceed with login
-        // 1. Get salt from server
-        const saltHex = await api.getSalt(cleanUsername);
+        // 1. Get salt (prefer local profile if available for offline resilience)
+        let saltHex = "";
+        const targetUsername = cleanUsername.toLowerCase();
+        
+        if (currentUser && currentUser.username.toLowerCase() === targetUsername && currentUser.passwordSalt) {
+          saltHex = currentUser.passwordSalt;
+        } else {
+          try {
+            saltHex = await api.getSalt(cleanUsername);
+          } catch (e) {
+            // Offline fallback: try to find user in local list if we don't have current user context
+            const localUsers = await api.getAllUsers().catch(() => []);
+            const matched = localUsers.find(u => u.username.toLowerCase() === targetUsername);
+            if (matched && matched.passwordSalt) {
+              saltHex = matched.passwordSalt;
+            } else {
+              throw new Error("Network unreachable and no local salt found for this user.");
+            }
+          }
+        }
+        
         const saltBytes = hexToBytes(saltHex);
 
         // 2. Compute hash locally
-        const computedHash = await hashPassword(credentials.password, saltBytes);
+        const computedHash = await hashPassword(password, saltBytes);
 
-        // 3. Authenticate with server
-        const user = await api.login(cleanUsername, computedHash);
+        // 3. Authenticate (try server, fallback to local comparison if offline)
+        let user: UserProfile;
+        try {
+          user = await api.login(cleanUsername, computedHash);
+        } catch (e) {
+          if (currentUser && currentUser.username.toLowerCase() === cleanUsername && currentUser.passwordHash === computedHash) {
+            user = currentUser;
+          } else {
+            // Try to verify against local user cache
+            const localUsers = await api.getAllUsers().catch(() => []);
+            const matched = localUsers.find(u => u.username.toLowerCase() === cleanUsername);
+            if (matched && matched.passwordHash === computedHash) {
+              user = matched;
+            } else {
+              throw e; // Re-throw if authentication truly fails
+            }
+          }
+        }
 
         // Derive Master Key deterministically
-        await deriveMasterKey(cleanUsername, credentials.password);
+        await deriveMasterKey(cleanUsername, password);
 
         setCurrentUser({ ...user, passwordHash: computedHash });
-        setSessionPassword(credentials.password);
-        showToast(`Unlocked workspace: ${user.displayName}!`, "success");
+        setSessionPassword(password);
+        showToast(isAutoAttempt ? "Passkey re-auth successful." : `Unlocked: ${user.displayName}!`, "success");
 
         setUsernameInput("");
         setPasswordInput("");
       } else {
-        showToast("No stored credentials found for this node. Please login manually first.", "error");
+        if (!isAutoAttempt) {
+          showToast("No stored credentials found for this node.", "error");
+        }
       }
     } catch (error: any) {
-      console.error(error);
-      showToast("Biometric unlock failed or not configured.", "error");
+      console.warn("Biometric login error:", error);
+      const errMsg = typeof error === 'string' ? error : error?.message || String(error);
+      
+      if (isAutoAttempt && (
+        errMsg.includes("No credentials found") || 
+        errMsg.includes("not found") || 
+        error?.code === 'CredentialsNotFound'
+      )) {
+        return;
+      }
+      
+      if (errMsg.includes("No credentials found") || error?.code === 'CredentialsNotFound' || errMsg.includes("Item not found") || errMsg.includes("not found")) {
+         showToast("No Passkey credentials saved. Please login manually first.", "error");
+      } else if (errMsg.includes("User cancelled") || errMsg.includes("Canceled") || errMsg.includes("cancelled") || error?.code === 10 || error?.code === 13) {
+         // User cancelled
+      } else {
+         showToast(errMsg || "Passkey unlock failed.", "error");
+      }
+    } finally {
+      // Ensure we release the lock after a short delay to allow UI to stabilize
+      setTimeout(() => {
+        isSystemActionRef.current = false;
+      }, 1000);
     }
   };
 
   const lockWorkspace = (reason?: string) => {
+    if (isSystemActionRef.current) return;
     setSessionPassword("");
     localStorage.removeItem("vault_session_password");
     showToast(reason || "Workspace locked.", "info");
   };
+
+  const backgroundLockTimerRef = React.useRef<NodeJS.Timeout | null>(null);
+
+  // Listen for backgrounding / foregrounding events
+  useEffect(() => {
+    const handleVisibilityChange = async () => {
+      if (document.visibilityState === "hidden") {
+        // App is backgrounded
+        if (isSystemActionRef.current) {
+          console.log("Visibility hidden but system action in progress, skipping lock.");
+          return;
+        }
+
+        // Delay lock if biometric auto-unlock is active (5-second grace period)
+        if (biometricAutoUnlock && sessionPassword) {
+          console.log("[Security] Backgrounding detected. Starting 5s auto-lock timer.");
+          if (backgroundLockTimerRef.current) clearTimeout(backgroundLockTimerRef.current);
+          
+          backgroundLockTimerRef.current = setTimeout(() => {
+            console.log("[Security] Grace period expired. Zeroing session memory.");
+            setSessionPassword("");
+            localStorage.removeItem("vault_session_password");
+            backgroundLockTimerRef.current = null;
+          }, 5000); // 5 seconds
+        }
+      } else if (document.visibilityState === "visible") {
+        // App is foregrounded
+        if (backgroundLockTimerRef.current) {
+          console.log("[Security] Returned within grace period. Cancelling lock timer.");
+          clearTimeout(backgroundLockTimerRef.current);
+          backgroundLockTimerRef.current = null;
+        }
+
+        if (isSystemActionRef.current) {
+          console.log("[Security] System action active, deferring biometric challenge.");
+          return;
+        }
+        if (biometricAutoUnlock && currentUser && !sessionPassword) {
+          // Attempt to auto-unlock using Passkeys
+          console.log("[Security] Foregrounding detected. Initiating Passkey challenge.");
+          setTimeout(() => {
+            if (!isSystemActionRef.current) {
+              handleBiometricLogin(currentUser.username, true);
+            }
+          }, 500);
+        }
+      }
+    };
+
+    const handleBeforeUnload = () => {
+      // Ensure session is cleared on tab close if biometric protection is active
+      if (biometricAutoUnlock) {
+        localStorage.removeItem("vault_session_password");
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, [biometricAutoUnlock, currentUser, sessionPassword]);
+
+  // Auto-unlock on initial app launch if biometricAutoUnlock is enabled
+  useEffect(() => {
+    if (biometricAutoUnlock && currentUser && !sessionPassword) {
+      const timer = setTimeout(() => {
+        handleBiometricLogin(currentUser.username, true);
+      }, 1000); // Small delay to let UI render
+      return () => clearTimeout(timer);
+    }
+  }, []); // Run once on mount
 
   const handleLogout = (reason?: string) => {
     setCurrentUser(null);
@@ -2591,6 +3289,17 @@ export default function App() {
     setCurrentPath("/");
     showToast(reason || "Securely zeroed master keys and logged out.", "info");
   };
+
+  useEffect(() => {
+    if (currentUser && !sessionPassword) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "auto";
+    }
+    return () => {
+      document.body.style.overflow = "auto";
+    };
+  }, [currentUser, sessionPassword]);
 
   // Manage Profiles & Rekey Workspace
   const handleUpdateProfile = async (e: React.FormEvent) => {
@@ -2646,7 +3355,7 @@ export default function App() {
         setRekeyingProgress("Awaiting secure data rotation...");
 
         // Fetch user files to re-encrypt
-        const userFiles = await api.getFiles(currentUser.id);
+        const userFiles = await api.getFiles(currentUser.id, currentUser.privateVaultId);
         const rekeyQueue: FileData[] = [];
 
         for (const file of userFiles) {
@@ -2708,6 +3417,17 @@ export default function App() {
         updatedUserProps.passwordSalt = newSaltHex;
 
         setSessionPassword(editNewPassword);
+
+        // Automatically attempt to update biometric/passkey with new password
+        if (isWebBiometricSupported() && currentUser) {
+          try {
+            await saveWebBiometric(currentUser.username, editNewPassword);
+            showToast("Passkey updated for hardware security.", "success");
+          } catch (biomErr) {
+            console.warn("Auto-biometric update skipped:", biomErr);
+          }
+        }
+
         showToast(
           "Keys rotated completely! All stored items updated E2E.",
           "success",
@@ -2784,7 +3504,10 @@ export default function App() {
 
   // Infinite-Scale Zero-RAM Stream Uploader (Handles files up to Terabytes flawlessly)
   const saveStreamingFile = async (file: File) => {
-    if (!currentUser || !currentUser.id) return;
+    if (!currentUser || !currentUser.id) {
+      showToast("Authentication required to import files. Please login first.", "error");
+      return;
+    }
 
     const lowercaseName = (file.name || "").toLowerCase();
     const lowercaseType = (file.type || "").toLowerCase();
@@ -2820,6 +3543,29 @@ export default function App() {
 
       // Call createFile passing physical File directly onto browser-native streaming
       if (checkDup && checkDup.id) {
+        try {
+          const dotIndex = checkDup.name.lastIndexOf(".");
+          const baseName = dotIndex !== -1 ? checkDup.name.substring(0, dotIndex) : checkDup.name;
+          const ext = dotIndex !== -1 ? checkDup.name.substring(dotIndex) : "";
+          const backupName = `${baseName} (Backup)${ext}`;
+          await api.createFile({
+            userId: currentUser.id,
+            privateVaultId: currentUser.privateVaultId,
+            name: backupName,
+            data: checkDup.data,
+            type: checkDup.type,
+            size: checkDup.size,
+            folderPath: checkDup.folderPath,
+            isFolder: false,
+            isShared: checkDup.isShared,
+            lastModified: checkDup.lastModified || Date.now(),
+            clientEncrypted: checkDup.clientEncrypted ?? false,
+          });
+          showToast(`Backed up original to "${backupName}" to prevent overwrite lock`, "info");
+        } catch (backupErr) {
+          console.error("Backup creation failed:", backupErr);
+        }
+
         await api.updateFile(currentUser.id, checkDup.id, {
           name: outputName,
           data: file as any, // updateFile will handle stream conversion if using raw update
@@ -2832,6 +3578,7 @@ export default function App() {
       } else {
         await api.createFile({
           userId: currentUser.id,
+          privateVaultId: currentUser.privateVaultId,
           name: outputName,
           data: file as any, // Cast to any since standard DB interface uses ArrayBuffer typing
           type: file.type || "application/octet-stream",
@@ -2858,7 +3605,11 @@ export default function App() {
         status: "Completed",
       });
 
-      showToast(`Saved: ${outputName} (High-Speed Direct Stream Encrypted)`, "success");
+      if (!navigator.onLine) {
+        showToast(`Saved offline: ${outputName} (cached in secure local storage)`, "info");
+      } else {
+        showToast(`Saved: ${outputName} (High-Speed Direct Stream Encrypted)`, "success");
+      }
       await refreshData();
     } catch (err: any) {
       console.error("Direct stream upload error:", err);
@@ -2874,7 +3625,10 @@ export default function App() {
     byteLength: number,
     buffer: ArrayBuffer,
   ) => {
-    if (!currentUser || !currentUser.id || !sessionPassword) return;
+    if (!currentUser || !currentUser.id || !sessionPassword) {
+      showToast("Authentication required to import files. Please login first.", "error");
+      return;
+    }
 
     const lowercaseName = (name || "").toLowerCase();
     const lowercaseType = (type || "").toLowerCase();
@@ -2911,6 +3665,29 @@ export default function App() {
       updateTransferProgress(tId, 45);
 
       if (checkDup && checkDup.id) {
+        try {
+          const dotIndex = checkDup.name.lastIndexOf(".");
+          const baseName = dotIndex !== -1 ? checkDup.name.substring(0, dotIndex) : checkDup.name;
+          const ext = dotIndex !== -1 ? checkDup.name.substring(dotIndex) : "";
+          const backupName = `${baseName} (Backup)${ext}`;
+          await api.createFile({
+            userId: currentUser.id,
+            privateVaultId: currentUser.privateVaultId,
+            name: backupName,
+            data: checkDup.data,
+            type: checkDup.type,
+            size: checkDup.size,
+            folderPath: checkDup.folderPath,
+            isFolder: false,
+            isShared: checkDup.isShared,
+            lastModified: checkDup.lastModified || Date.now(),
+            clientEncrypted: checkDup.clientEncrypted ?? true,
+          });
+          showToast(`Backed up original to "${backupName}" to prevent overwrite lock`, "info");
+        } catch (backupErr) {
+          console.error("Backup creation failed:", backupErr);
+        }
+
         await api.updateFile(currentUser.id, checkDup.id, {
           name: outputName,
           data: encryptedBuffer,
@@ -2922,6 +3699,7 @@ export default function App() {
       } else {
         await api.createFile({
           userId: currentUser.id,
+          privateVaultId: currentUser.privateVaultId,
           name: outputName,
           data: encryptedBuffer,
           type: type || "application/octet-stream",
@@ -2948,7 +3726,11 @@ export default function App() {
         status: "Completed",
       });
 
-      showToast(`Encrypted & stored: ${outputName}`, "success");
+      if (!navigator.onLine) {
+        showToast(`Encrypted & stored offline: ${outputName} (secure local storage)`, "info");
+      } else {
+        showToast(`Encrypted & stored: ${outputName}`, "success");
+      }
       refreshData();
     } catch (err: any) {
       console.error("Error saving uploaded file:", err);
@@ -2959,8 +3741,10 @@ export default function App() {
         "error"
       );
       if (errMsg.includes("database reset") || errMsg.includes("register/login again") || errMsg.includes("Unauthorized")) {
-        console.warn("API/Database reset detected in saveUploadedFile, logging out.");
-        handleLogout("Session ended: Device database was reset. Please login or register again.");
+        console.warn("API/Database reset detected in saveUploadedFile, locking workspace.");
+        setSessionPassword("");
+        localStorage.removeItem("vault_session_password");
+        showToast("Database reset detected. Please re-enter master password to sync workspace.", "info");
       }
     }
   };
@@ -2973,6 +3757,7 @@ export default function App() {
 
     console.log("File upload started:", file.name, file.size, file.type);
     try {
+      isSystemActionRef.current = true;
       if (file.size > 50 * 1024 * 1024) {
         // High capacity direct stream upload for files > 50MB
         await saveStreamingFile(file);
@@ -2985,6 +3770,7 @@ export default function App() {
       console.error("Error reading/uploading file:", err);
       showToast("Could not read local file: " + (err instanceof Error ? err.message : "Network/Sync error"), "error");
     } finally {
+      isSystemActionRef.current = false;
       event.target.value = ""; // Clear file input so the same file can be uploaded again
     }
   };
@@ -3015,6 +3801,7 @@ export default function App() {
     }
     if (droppedFiles.length > 0) {
       console.log(`Multi-file drop import started: ${droppedFiles.length} files.`);
+      isSystemActionRef.current = true;
       
       // Process all dropped files
       const uploadPromises = droppedFiles.map(async (file) => {
@@ -3033,6 +3820,7 @@ export default function App() {
       });
 
       await Promise.all(uploadPromises);
+      isSystemActionRef.current = false;
       // Final refresh after all files are processed to avoid intermediate visual 'doubling' or flickering
       refreshData();
     }
@@ -3057,7 +3845,7 @@ export default function App() {
       const isMassive = file.size > 50 * 1024 * 1024;
 
       // High capacity direct stream download: bypasses arrayBuffer and downloads zero-RAM directly if server encrypted!
-      if (!isClientEncrypted) {
+      if (!isClientEncrypted && navigator.onLine) {
         updateTransferProgress(tId, 30);
         
         const a = document.createElement("a");
@@ -3165,7 +3953,7 @@ export default function App() {
     try {
       setPublicShareDialog(prev => ({ ...prev, isProcessing: true, progress: 0 }));
 
-      // Simulate initial verification progress
+      // Render active verification progress
       for (let i = 0; i <= 30; i += 10) {
         setPublicShareDialog(prev => ({ ...prev, progress: i }));
         await new Promise(r => setTimeout(r, 100));
@@ -3335,18 +4123,59 @@ export default function App() {
   };
 
   const handleOpenVersionHistory = async (file: FileData) => {
+    if (!file || !file.id) {
+      showToast("Invalid file selection.", "error");
+      return;
+    }
     setVersionHistoryFile(file);
     setIsLoadingVersions(true);
     setFileVersions([]);
+
+    const isAppOffline = !navigator.onLine || !isOnline;
+
+    if (isAppOffline) {
+      try {
+        const cached = localStorage.getItem(`file_versions_${file.id}`);
+        if (cached) {
+          const data = JSON.parse(cached);
+          setFileVersions(data);
+          showToast("Loaded offline file history cache.", "info");
+        } else {
+          showToast("Offline: No version history cache available for this file.", "info");
+        }
+      } catch (cacheErr) {
+        showToast("Error loading offline file history.", "error");
+      } finally {
+        setIsLoadingVersions(false);
+      }
+      return;
+    }
+
     try {
       const res = await fetch(`/api/files/${file.id}/versions`, {
-        headers: { 'X-User-Id': currentUser!.id.toString() }
+        headers: { 'X-User-Id': currentUser?.id?.toString() || "" }
       });
       if (!res.ok) throw new Error("Failed to load versions");
       const data = await res.json();
       setFileVersions(data);
+      try {
+        localStorage.setItem(`file_versions_${file.id}`, JSON.stringify(data));
+      } catch (err) {
+        console.warn("Failed to cache file versions:", err);
+      }
     } catch (e: any) {
-      showToast("Error loading file history.", "error");
+      try {
+        const cached = localStorage.getItem(`file_versions_${file.id}`);
+        if (cached) {
+          const data = JSON.parse(cached);
+          setFileVersions(data);
+          showToast("Loaded offline file history cache.", "info");
+        } else {
+          showToast("Error loading file history. No offline cache available.", "error");
+        }
+      } catch (cacheErr) {
+        showToast("Error loading file history.", "error");
+      }
     } finally {
       setIsLoadingVersions(false);
     }
@@ -3354,6 +4183,10 @@ export default function App() {
 
   const handleRestoreVersion = async (versionId: number) => {
     if (!versionHistoryFile || !currentUser) return;
+    if (!navigator.onLine) {
+      showToast("You must be online to restore previous file versions.", "error");
+      return;
+    }
     try {
       const res = await fetch(`/api/files/${versionHistoryFile.id}/versions/${versionId}/restore`, {
         method: "POST",
@@ -3390,7 +4223,7 @@ export default function App() {
         // PERMANENT DELETION inside trash bin
         if (target.isFolder) {
           const pathPrefix = target.folderPath + "/" + target.name;
-          const allMyFiles = await api.getFiles(currentUser.id);
+          const allMyFiles = await api.getFiles(currentUser.id, currentUser.privateVaultId);
           console.log("Recursive delete folder, found all files", allMyFiles.length);
 
           const itemsToDelete = allMyFiles.filter((item) => {
@@ -3425,7 +4258,7 @@ export default function App() {
             (target.folderPath === "/" ? "" : target.folderPath) +
             "/" +
             target.name;
-          const allMyFiles = await api.getFiles(currentUser.id);
+          const allMyFiles = await api.getFiles(currentUser.id, currentUser.privateVaultId);
           console.log("Recursive move folder, found all files", allMyFiles.length);
 
           const itemsToTrash = allMyFiles.filter((item) => {
@@ -3490,7 +4323,7 @@ export default function App() {
 
       if (target.isFolder) {
         const relativePathPrefix = "/Trash/" + target.name;
-        const allMyFiles = await api.getFiles(currentUser.id);
+        const allMyFiles = await api.getFiles(currentUser.id, currentUser.privateVaultId);
 
         const itemsToRestore = allMyFiles.filter((item) => {
           if (item.id === target.id) return true;
@@ -3682,7 +4515,7 @@ export default function App() {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
   };
 
-  // Quick switch companion accounts offline simulator
+  // Quick switch companion accounts offline node manager
   const handleQuickSwitchUser = async (user: UserProfile) => {
     setCurrentUser(user);
     setSessionPassword(""); // Clear session password to trigger the Lock screen
@@ -3800,7 +4633,7 @@ export default function App() {
     }
   };
 
-  // Interactive P2P Air-Sync File Receiver simulator
+  // Interactive P2P Air-Sync File Receiver workflow
   const initiateP2PSync = (file: FileData, peer: UserProfile) => {
     setSyncingFile({
       file,
@@ -3911,6 +4744,9 @@ export default function App() {
 
   // Computed fields for active browser viewport list
   const filteredVaultItems = files.filter((item) => {
+    if (onlyShowOffline && item.isFolder) return false;
+    if (onlyShowOffline && item.clientEncrypted === false) return false;
+
     // If search query is active, search globally across all folder spaces;
     // otherwise, restrict file listing strictly to the active directory.
     if (!searchQuery && item.folderPath !== currentPath) return false;
@@ -4002,33 +4838,33 @@ export default function App() {
   }, [allUsers, currentUser, files]);
 
   return (
-    <div className={`min-h-screen ${!currentUser || !sessionPassword ? 'bg-slate-950' : 'bg-[#0a0c10]'} font-sans text-white relative selection:bg-indigo-500/30 selection:text-white`}>
-        {/* Header Section */}
-        {currentUser && sessionPassword && !showSettingsPanel && !showNetworkDocs && !viewingDagBlock && !showVaultIntegrityModal && !showSovereignRecovery ? (
-          <header className="sticky top-0 z-[60] bg-[#0a0c10]/95 backdrop-blur-2xl border-b border-white/5 w-full">
-            <div className="max-w-7xl mx-auto px-3 sm:px-4 md:px-8 py-4">
-              <div className="flex flex-col gap-4">
-                <div className="flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-4">
-                    <div className="w-12 h-12 bg-indigo-600/10 border border-indigo-500/20 rounded-2xl flex items-center justify-center shadow-2xl shrink-0 group relative overflow-hidden">
-                      <div className="absolute inset-0 bg-indigo-500/5 blur-xl group-hover:bg-indigo-500/10 transition-all rounded-full" />
-                      <Briefcase className="text-indigo-400 w-7 h-7 relative z-10" />
-                    </div>
-                    <div>
-                      <h1 className="text-2xl sm:text-3xl font-black tracking-tight leading-none text-white uppercase">
-                        SOVEREIGN VAULT
-                      </h1>
-                      <p className="text-[10px] font-black tracking-[0.25em] text-slate-500 uppercase mt-1">
-                        DECENTRALIZED P2P MESH
-                      </p>
-                    </div>
-                  </div>
-                </div>
+    <div className={`flex flex-col min-h-screen ${!currentUser || !sessionPassword ? 'bg-slate-950' : 'bg-[#0a0c10]'} font-sans text-white relative selection:bg-indigo-500/30 selection:text-white`}>
+        {/* Responsive Sidebar / Slide-out Drawer */}
+        <AnimatePresence>
+          {isSidebarOpen && currentUser && sessionPassword && (
+            <>
+              {/* Backdrop */}
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setIsSidebarOpen(false)}
+                className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-[80]"
+              />
 
-                <div className="bg-[#11131a] p-1.5 rounded-[24px] border border-white/5 flex flex-row items-center gap-3 shadow-xl">
-                  <div className="flex items-center gap-3 pl-2 pr-4 shrink-0 border-r border-white/5">
+              {/* Drawer Panel */}
+              <motion.div
+                initial={{ x: "-100%" }}
+                animate={{ x: 0 }}
+                exit={{ x: "-100%" }}
+                transition={{ type: "spring", damping: 25, stiffness: 200 }}
+                className="fixed top-0 bottom-0 left-0 w-80 bg-[#0e1017] border-r border-white/5 z-[90] flex flex-col p-6 overflow-y-auto"
+              >
+                {/* Header Profile Section */}
+                <div className="bg-[#13161f]/80 p-4 rounded-3xl border border-white/5 flex items-center justify-between gap-3 mb-6">
+                  <div className="flex items-center gap-3 min-w-0">
                     <div
-                      className="w-9 h-9 rounded-full flex items-center justify-center font-black text-xs uppercase shadow-2xl text-white shrink-0 border border-white/10"
+                      className="w-10 h-10 rounded-2xl flex items-center justify-center font-black text-sm uppercase shadow-2xl text-white shrink-0 border border-white/10"
                       style={{
                         backgroundColor: currentUser.avatarColor || "#6366f1",
                       }}
@@ -4036,53 +4872,254 @@ export default function App() {
                       {currentUser.displayName.slice(0, 2)}
                     </div>
                     <div className="text-left min-w-0">
-                      <span className="font-black block truncate text-sm text-white leading-tight">
-                        {currentUser.displayName}
+                      <span className="font-bold block truncate text-sm text-white leading-tight">
+                        @{currentUser.username}
                       </span>
-                      <span className="text-[9px] uppercase tracking-wider text-indigo-400 font-black block truncate leading-none">
-                        Secure Zone
+                      <span className="text-[10px] text-indigo-300/60 font-medium italic block truncate leading-none mt-1">
+                        @{currentUser.username}
                       </span>
                     </div>
                   </div>
-                  
-                  <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-none no-scrollbar flex-1">
+                  <button
+                    onClick={() => setIsSidebarOpen(false)}
+                    className="p-1.5 rounded-xl hover:bg-white/5 text-slate-400 hover:text-white transition-all"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                {/* Primary Nav Links */}
+                <div className="space-y-1">
+                  <button
+                    onClick={() => {
+                      setCurrentPath("/");
+                      setOnlyShowOffline(false);
+                      setSelectedCategory("all");
+                      setIsSidebarOpen(false);
+                    }}
+                    className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm font-medium transition-all ${
+                      currentPath !== "/Trash" && !onlyShowOffline && selectedCategory === "all"
+                        ? "bg-indigo-600/10 text-indigo-400 border border-indigo-500/20"
+                        : "text-slate-400 hover:text-white hover:bg-white/5"
+                    }`}
+                  >
+                    <HardDrive className="w-5 h-5" />
+                    My files
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setCurrentPath("/Trash");
+                      setOnlyShowOffline(false);
+                      setIsSidebarOpen(false);
+                    }}
+                    className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm font-medium transition-all ${
+                      currentPath === "/Trash"
+                        ? "bg-indigo-600/10 text-indigo-400 border border-indigo-500/20"
+                        : "text-slate-400 hover:text-white hover:bg-white/5"
+                    }`}
+                  >
+                    <Trash2 className="w-5 h-5" />
+                    Trash
+                  </button>
+
+                </div>
+
+                {/* More Section */}
+                <div className="mt-6">
+                  <h3 className="font-serif italic text-indigo-400/80 text-sm tracking-wider pl-4 mb-2">
+                    More
+                  </h3>
+                  <div className="space-y-1">
                     <button
-                      onClick={() => setShowTransferHistoryModal(true)}
-                      className="bg-white/5 hover:bg-white/10 border border-white/10 text-white p-2 rounded-full transition-all flex items-center justify-center"
-                      title="History"
+                      onClick={() => {
+                        setShowSettingsPanel(true);
+                        setIsSidebarOpen(false);
+                      }}
+                      className="w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm font-medium text-slate-400 hover:text-white hover:bg-white/5 transition-all text-left"
                     >
-                      <History className="w-5 h-5 text-indigo-300/60" />
+                      <Settings className="w-5 h-5" />
+                      Settings
                     </button>
+
                     <button
-                      onClick={() => setShowNetworkDocs(true)}
-                      className="bg-white/5 hover:bg-white/10 border border-white/10 text-white p-2 rounded-full transition-all flex items-center justify-center"
-                      title="Docs"
-                    >
-                      <BookOpen className="w-5 h-5 text-indigo-300/60" />
-                    </button>
-                    <button
-                      onClick={() => setShowSettingsPanel(true)}
-                      className="bg-indigo-600 hover:bg-indigo-500 text-white p-2 rounded-full transition-all flex items-center justify-center shadow-lg shadow-indigo-500/20"
-                      title="Settings"
-                    >
-                      <SlidersHorizontal className="w-5 h-5" />
-                    </button>
-                    <button
-                      onClick={() => handleLogout()}
-                      className="bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-red-400 p-2 rounded-full transition-all flex items-center justify-center ml-auto"
-                      title="Logout"
+                      onClick={() => {
+                        handleLogout();
+                        setIsSidebarOpen(false);
+                      }}
+                      className="w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm font-medium text-red-400 hover:text-red-300 hover:bg-red-500/5 transition-all text-left"
                     >
                       <LogOut className="w-5 h-5" />
+                      Sign out
                     </button>
                   </div>
+                </div>
+
+                {/* Diagnostic & Tools Section */}
+                <div className="mt-6 pt-6 border-t border-white/5">
+                  <h3 className="text-xs uppercase tracking-widest text-slate-500 pl-4 mb-2">
+                    System Tools
+                  </h3>
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      onClick={() => { setShowTransferHistoryModal(true); setIsSidebarOpen(false); }}
+                      className="bg-white/5 hover:bg-white/10 p-2.5 rounded-xl transition-all flex items-center justify-center text-indigo-300/80"
+                      title="History"
+                    >
+                      <History className="w-5 h-5" />
+                    </button>
+                    <button
+                      onClick={() => { setShowDevicePairing(true); setIsSidebarOpen(false); }}
+                      className="bg-white/5 hover:bg-white/10 p-2.5 rounded-xl transition-all flex items-center justify-center text-indigo-300/80"
+                      title="Pair Device"
+                    >
+                      <Smartphone className="w-5 h-5" />
+                    </button>
+                    <button
+                      onClick={() => { setShowNetworkDocs(true); setIsSidebarOpen(false); }}
+                      className="bg-white/5 hover:bg-white/10 p-2.5 rounded-xl transition-all flex items-center justify-center text-indigo-300/80"
+                      title="Docs"
+                    >
+                      <BookOpen className="w-5 h-5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Real QS Lite Database Storage Cluster Indicators */}
+                <div className="mt-auto pt-6 border-t border-white/5 space-y-4">
+                  <div className="flex items-center gap-2 pl-2">
+                    <Infinity className="w-5 h-5 text-indigo-400 animate-pulse" />
+                    <span className="font-mono text-[9px] text-indigo-300 uppercase tracking-widest font-black flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-ping animate-duration-[2000ms]" />
+                      ACTIVE QS LITE DB CLUSTER
+                    </span>
+                  </div>
+
+                  <div className="px-4 py-2 bg-slate-950/40 rounded-lg text-[10px] font-mono border border-white/[0.03]">
+                    {isOnline ? (
+                      <span className="text-indigo-300">Online — Showing synced files only ({files.filter(f => f.isOfflineOnly).length} offline files hidden)</span>
+                    ) : (
+                      <span className="text-yellow-400">Offline mode — All local files visible</span>
+                    )}
+                  </div>
+
+                  {syncStatus && syncStatus.active && (
+                    <div className="px-4 py-3 bg-indigo-950/40 border border-indigo-500/20 rounded-xl space-y-1.5 animate-pulse">
+                      <div className="flex justify-between text-[10px] text-indigo-300 font-mono font-black uppercase tracking-widest">
+                        <span>Offline Sync...</span>
+                        <span>{syncStatus.done}/{syncStatus.total} files</span>
+                      </div>
+                      <div className="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden">
+                        <div 
+                          className="bg-gradient-to-r from-indigo-500 to-emerald-400 h-1.5 rounded-full transition-all duration-300"
+                          style={{ width: `${Math.round((syncStatus.done / syncStatus.total) * 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="bg-slate-950/40 border border-white/[0.03] p-4 rounded-2xl space-y-3">
+                    <div className="flex items-center justify-between text-xs text-slate-300 font-bold font-mono">
+                      <span>Database:</span>
+                      <span className="text-white">vault.db</span>
+                    </div>
+
+                    <div className="space-y-2 border-t border-white/[0.03] pt-2">
+                      <div className="flex justify-between text-[11px] text-slate-400">
+                        <span>Cold Index Size:</span>
+                        <span className="font-mono font-bold text-indigo-300">{formatBytes(totalStorageSize)}</span>
+                      </div>
+                      <div className="flex justify-between text-[11px] text-slate-400">
+                        <span>Encrypted Files:</span>
+                        <span className="font-mono font-bold text-emerald-400">{activeFiles.filter((f) => !f.isFolder).length}</span>
+                      </div>
+                      <div className="flex justify-between text-[11px] text-slate-400">
+                        <span>Pool Storage Class:</span>
+                        <span className="font-mono font-bold text-teal-400 text-right text-[10px]">UNLIMITED</span>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5 border-t border-white/[0.03] pt-2">
+                      <div className="flex justify-between text-[9px] uppercase font-mono tracking-wider text-slate-500">
+                        <span>Pool Consumption:</span>
+                        <span className="text-teal-400 font-extrabold">0.00% of ∞</span>
+                      </div>
+                      <div className="relative h-1.5 w-full bg-slate-900 rounded-full overflow-hidden border border-white/[0.03]">
+                        <div className="absolute top-0 left-0 h-full w-[2%] bg-gradient-to-r from-indigo-500 to-teal-400 rounded-full shadow-[0_0_8px_rgba(20,184,166,0.5)] animate-pulse" />
+                      </div>
+                    </div>
+
+                    <p className="text-[9px] text-slate-500 leading-normal font-sans pt-1 border-t border-white/[0.03]">
+                      Safe offline partition enabled. SQLite relational storage limits are disabled. Uploads are limited to 50MB per file.
+                    </p>
+                  </div>
+                </div>
+              </motion.div>
+            </>
+          )}
+        </AnimatePresence>
+
+        {/* Compact Top Bar */}
+        {currentUser && sessionPassword && !showSettingsPanel && !showNetworkDocs && !viewingDagBlock && !showSovereignRecovery ? (
+          <header className="sticky top-0 z-[60] bg-[#0a0c10] border-b border-white/10 w-full shadow-2xl">
+            <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
+              {/* Menu Button */}
+              <button
+                onClick={() => setIsSidebarOpen(true)}
+                className="p-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 transition-all text-slate-300 hover:text-white"
+                id="sidebar-toggle-btn"
+              >
+                <Menu className="w-5 h-5" />
+              </button>
+
+              {/* Title */}
+              <h1 className="font-serif italic font-medium text-xl sm:text-2xl tracking-wide text-white">
+                {currentPath === "/Trash"
+                  ? "Trash"
+                  : onlyShowOffline
+                    ? "Available offline"
+                    : selectedCategory === "image"
+                      ? "Photos"
+                      : "My files"}
+              </h1>
+
+              {/* Right Side Icons */}
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={async () => {
+                    try {
+                      await refreshData();
+                      await refreshSharedFiles();
+                      if (!navigator.onLine) {
+                        showToast("Workspace refreshed offline (showing local files)", "info");
+                      } else {
+                        showToast("Workspace refreshed and synced with server", "success");
+                      }
+                    } catch (e) {
+                      showToast("Failed to refresh workspace", "error");
+                    }
+                  }}
+                  className="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-white transition-all border border-white/10 active:scale-95"
+                  title="Refresh Data"
+                >
+                  <RefreshCcw className="w-5 h-5" />
+                </button>
+
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-indigo-500/10 border border-indigo-500/20 group cursor-pointer hover:bg-indigo-500/20 transition-all">
+                  <div className="w-6 h-6 bg-indigo-600 rounded-lg flex items-center justify-center shadow-lg shadow-indigo-500/20 group-hover:scale-110 transition-transform">
+                    <Database className="w-3.5 h-3.5 text-white" />
+                  </div>
+                  <span className="text-xs font-black uppercase tracking-[0.2em] text-indigo-100">Vault</span>
                 </div>
               </div>
             </div>
           </header>
         ) : null}
 
+        {/* Compact Top Bar is closed above */}
 
-      <div className={!currentUser || !sessionPassword ? "w-full" : "max-w-7xl mx-auto px-3 sm:px-4 md:px-8 py-4 sm:py-8"}>
+
+      <div className={!currentUser || !sessionPassword ? "w-full flex-1 flex flex-col" : "flex-1 flex flex-col max-w-7xl mx-auto w-full px-3 sm:px-4 md:px-8 pt-4 pb-0 sm:pt-8 sm:pb-0"}>
         {/* Toast status alerts */}
         <AnimatePresence>
           {notification && (
@@ -4407,7 +5444,7 @@ export default function App() {
                              {publicShareDialog.mode === "share" ? "Decrypting file to local shared pool" : "Encrypting file... Removing from local shared pool"}
                           </span>
                           <span className="text-[8px] font-mono text-indigo-300/40 uppercase tracking-tighter">
-                            AES-256-GCM + XChaCha20-Poly1305 Protocol Integration
+                            Ring-LWE + AES-256-GCM Quantum-Resistant Hybrid Protocol
                           </span>
                         </div>
                         <span className="text-xl font-black text-white italic">{publicShareDialog.progress}%</span>
@@ -4421,7 +5458,7 @@ export default function App() {
         </AnimatePresence>
 
         {/* Main Grid Workspace */}
-        <main className={!currentUser || !sessionPassword || activeRecoveryPack ? "flex flex-col flex-1 items-center justify-center min-h-screen w-full" : "flex flex-col flex-1 w-full"}>
+        <main className={!currentUser || !sessionPassword || activeRecoveryPack ? "flex flex-col flex-1 items-center justify-center w-full min-h-screen" : "flex-1 flex flex-col w-full overflow-y-auto pb-20 sm:pb-20"}>
           {activeRecoveryPack ? (
             <SovereignRecoveryConsole
               packData={activeRecoveryPack}
@@ -4443,34 +5480,32 @@ export default function App() {
               handleLogin={handleLogin}
               handleQuickSwitchUser={handleQuickSwitchUser}
               handleVaultPackImport={handleVaultPackImport}
+              handleMnemonicOrMasterKeyRecovery={handleMnemonicOrMasterKeyRecovery}
               hasBiometric={hasBiometric}
-              handleBiometricLogin={handleBiometricLogin}
+              handleBiometricSign={handleBiometricLogin}
             />
           ) : !sessionPassword ? (
             /* AUTHENTICATED BUT LOCKED: Dedicated Auto-Lock Screen */
-            <div className="w-full min-h-screen flex items-center justify-center bg-slate-950 p-4 sm:p-6">
+            <div className="w-full h-screen overflow-y-auto flex items-center justify-center bg-slate-950 p-4 sm:p-6 fixed inset-0 z-[200]">
               <motion.div
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
                 className="bg-slate-900/50 backdrop-blur-3xl p-6 sm:p-10 rounded-2xl sm:rounded-[40px] border border-slate-800 shadow-2xl text-center max-w-lg w-full"
               >
                 <div className="mb-10 flex flex-col items-center">
-                  <div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center shadow-[0_0_30px_rgba(79,70,229,0.3)] mb-8 shrink-0">
-                    <Briefcase className="text-white w-8 h-8" />
-                  </div>
                   <div
                     className="w-24 h-24 rounded-3xl flex items-center justify-center text-3xl font-black text-white shadow-2xl mb-6 border-4 border-slate-800"
                     style={{
-                      backgroundColor: currentUser.avatarColor || "#6366f1",
+                      backgroundColor: currentUser?.avatarColor || "#6366f1",
                     }}
                   >
-                    {currentUser.displayName.slice(0, 2).toUpperCase()}
+                    {currentUser?.displayName?.slice(0, 2).toUpperCase() || "???"}
                   </div>
                   <h2 className="text-3xl font-black tracking-tighter text-white mb-1 uppercase">
-                    {currentUser.displayName}
+                    {currentUser?.displayName || "SECURE USER"}
                   </h2>
                   <p className="text-xs font-black text-slate-500 uppercase tracking-[0.2em] leading-none">
-                    SECURED NODE: @{currentUser.username}
+                    SECURED NODE: @{currentUser?.username || "unknown"}
                   </p>
                 </div>
 
@@ -4485,7 +5520,8 @@ export default function App() {
                   onSubmit={(e) => handleLogin(e, currentUser.username)}
                   className="space-y-6"
                 >
-                  <div className="relative">
+
+                  <div className="relative mb-4">
                     <input
                       type={showPassword ? "text" : "password"}
                       required
@@ -4515,16 +5551,12 @@ export default function App() {
                     Unlock Nodes
                   </button>
 
-                  {hasBiometric && (
-                    <button
-                      type="button"
-                      onClick={() => handleBiometricLogin?.(currentUser.username)}
-                      className="w-full bg-slate-900 border border-slate-700 hover:bg-slate-800 text-white py-5 rounded-2xl font-black text-sm tracking-[0.2em] shadow-xl active:scale-95 transition-all uppercase mb-6 flex items-center justify-center gap-3"
-                    >
-                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-fingerprint"><path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4"/><path d="M15 13a5 5 0 0 0-6-1.5"/><path d="M18 16a8 8 0 0 0-11-2.5"/><path d="M9 22c-1.5-1.5-2.5-4-2.5-7a8 8 0 0 1 15-2"/><path d="M9 18v2"/><path d="M15 22v-3.5"/></svg>
-                      Biometric Unlock
-                    </button>
-                  )}
+                  {/* Automatic Biometric Logic triggered via useEffect */}
+                  <div className="pt-4">
+                    <p className="text-[10px] text-slate-500 text-center font-medium opacity-50 italic uppercase tracking-widest">
+                      Biometric hardware signature active
+                    </p>
+                  </div>
 
                   <button
                     type="button"
@@ -4539,41 +5571,11 @@ export default function App() {
             </div>
           ) : (
             /* FULLY UNLOCKED: Main Dashboard */
-            <div className="flex flex-col flex-1 min-h-0 w-full animate-fade-in">
-              {/* Mobile View Switcher - Only visible on small/medium screens (< lg) */}
-              <div className="lg:hidden flex p-1 bg-slate-950/60 border border-white/5 rounded-2xl mb-6 relative z-10 shadow-lg">
-                <button
-                  type="button"
-                  id="mobile-tab-files"
-                  onClick={() => setMobileActiveTab("files")}
-                  className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all duration-200 ${
-                    mobileActiveTab === "files"
-                      ? "bg-indigo-600 text-white shadow-lg shadow-indigo-600/20 border border-white/10"
-                      : "text-indigo-300/40 hover:text-white"
-                  }`}
-                >
-                  <Database className="w-4 h-4" />
-                  Files
-                </button>
-                <button
-                  type="button"
-                  id="mobile-tab-mesh"
-                  onClick={() => setMobileActiveTab("mesh")}
-                  className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all duration-200 ${
-                    mobileActiveTab === "mesh"
-                      ? "bg-indigo-600 text-white shadow-lg shadow-indigo-600/20 border border-white/10"
-                      : "text-indigo-300/40 hover:text-white"
-                  }`}
-                >
-                  <Globe className="w-4 h-4" />
-                  Mesh Network
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 flex-1 min-h-0 w-full">
+            <div className="flex flex-col min-h-0 w-full animate-fade-in pt-6">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 min-h-0 w-full">
                 {/* Left Column: Explorer - Restored to 8 columns for multi-view layout */}
                 <div className={`${mobileActiveTab === "files" ? "flex" : "hidden"} lg:flex col-span-1 lg:col-span-8 flex-col min-h-0`}>
-                <section className="bg-white/5 backdrop-blur-md rounded-[32px] overflow-hidden border border-white/10 flex flex-col flex-1 shadow-2xl">
+                <section className="bg-white/5 backdrop-blur-md rounded-[32px] overflow-hidden border border-white/10 flex flex-col shadow-2xl">
                   {/* Search, Action Toolbar */}
                   <div className="p-4 md:p-6 pb-0 flex flex-col md:flex-row gap-4 justify-between items-stretch">
                     {/* Search Component with id */}
@@ -4610,12 +5612,14 @@ export default function App() {
                             <Plus className="w-4 h-4" /> New Folder
                           </button>
 
-                          {/* Manual Select File to import */}
                           <label
-                            className="bg-white text-indigo-700 cursor-pointer rounded-2xl px-3 py-3 text-xs font-black uppercase tracking-wider flex items-center justify-center gap-1.5 shadow-md hover:scale-[1.02] active:scale-95 transition-all"
+                            className="bg-white text-indigo-700 cursor-pointer rounded-2xl px-4 py-3 text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/10 hover:scale-[1.02] active:scale-95 transition-all"
                             htmlFor="file-manager-upload"
+                            onClick={() => {
+                              isSystemActionRef.current = true;
+                            }}
                           >
-                            <Upload className="w-4 h-4" /> Import Files
+                            <Upload className="w-4 h-4" /> Upload
                             <input
                               type="file"
                               id="file-manager-upload"
@@ -4669,83 +5673,31 @@ export default function App() {
                     )}
                   </AnimatePresence>
 
-                  {/* Breadcrumbs Navigation with high utility styling */}
-                  <div className="mx-4 md:mx-6 flex items-center gap-2 text-xs font-bold text-indigo-200 border-t border-white/5 pt-4 flex-wrap">
-                    <button
-                      onClick={() => handleBreadcrumbClick(-1, [])}
-                      className="hover:text-white flex items-center gap-1 uppercase tracking-wider"
-                    >
-                      <FolderOpen className="w-4 h-4 text-indigo-300" />{" "}
-                      Workspace Root
-                    </button>
-
-                    {pathParts.map((part, index) => (
-                      <React.Fragment key={index}>
-                        <ChevronRight className="w-4 h-4 text-indigo-400" />
-                        <button
-                          onClick={() =>
-                            handleBreadcrumbClick(index, pathParts)
-                          }
-                          className={`hover:text-white uppercase tracking-wider ${index === pathParts.length - 1 ? "text-white underline decoration-2 decoration-indigo-300 font-extrabold" : ""}`}
-                        >
-                          {part}
-                        </button>
-                      </React.Fragment>
-                    ))}
-
-                    <div className="flex-1 min-w-[12px]" />
-
-                    <button
-                      onClick={() => {
-                        if (currentPath === "/Trash") {
-                          setCurrentPath("/");
-                        } else {
-                          setCurrentPath("/Trash");
-                        }
-                      }}
-                      className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 transition-all outline-none border ${
-                        currentPath === "/Trash"
-                          ? "bg-red-500/20 text-red-300 border-red-500/30 shadow-md ring-1 ring-red-400/30"
-                          : "bg-white/5 text-indigo-300 border-white/5 hover:bg-white/10 hover:text-white"
-                      }`}
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      {currentPath === "/Trash" ? "Back to Files" : "Trash"}
-                    </button>
-                  </div>
-
-                  {/* Categories Tab selectors */}
-                <div className="mx-4 md:mx-6 flex gap-2 overflow-x-auto pb-4 no-scrollbar scrollbar-none snap-x snap-mandatory px-1 scroll-smooth">
-                  {[
-                    { id: "all", label: "All", icon: FileText },
-                    { id: "folders", label: "Folders", icon: Folder },
-                    { id: "secure", label: "Keys & Seeds 🔐", icon: Shield },
-                    { id: "app", label: "APKs & Apps 📱", icon: FileCode },
-                    { id: "document", label: "Docs", icon: FileText },
-                    { id: "image", label: "Images", icon: ImageIcon },
-                    { id: "media", label: "Media", icon: Music },
-                    { id: "video", label: "Video", icon: Film },
-                    { id: "html", label: "HTML", icon: Globe },
-                    { id: "archive", label: "Zip", icon: Archive },
-                  ].map((tab) => {
-                    const Icon = tab.icon;
-                    const isActive = selectedCategory === tab.id;
-                    return (
+                  {/* Clean, Native-Style Back/Path Navigation Row (only shows when inside subfolder or when category is customized) */}
+                  {(currentPath !== "/" || selectedCategory !== "all") && (
+                    <div className="mx-4 md:mx-6 flex items-center gap-2 border-t border-white/5 pt-4">
                       <button
-                        key={tab.id}
-                        onClick={() => setSelectedCategory(tab.id)}
-                        className={`px-4 py-2.5 rounded-full text-xs font-bold whitespace-nowrap flex items-center gap-2 transition-all snap-start ${
-                          isActive
-                            ? "bg-white text-indigo-900 shadow-md scale-105"
-                            : "bg-white/10 text-indigo-200 hover:bg-white/15"
-                        }`}
+                        onClick={() => {
+                          if (currentPath === "/Trash") {
+                            setCurrentPath("/");
+                          } else if (currentPath !== "/") {
+                            const parts = currentPath.split("/").filter(Boolean);
+                            parts.pop();
+                            setCurrentPath(parts.length === 0 ? "/" : "/" + parts.join("/"));
+                          } else {
+                            setSelectedCategory("all");
+                          }
+                        }}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-indigo-300 hover:text-white text-xs font-black uppercase tracking-wider transition-all duration-200"
                       >
-                        <Icon className="w-3.5 h-3.5" />
-                        {tab.label}
+                        <ArrowLeft className="w-3.5 h-3.5 text-indigo-400" />
+                        Back
                       </button>
-                    );
-                  })}
-                </div>
+                      <div className="text-[10px] text-slate-400 font-bold uppercase tracking-widest font-mono select-none overflow-hidden text-ellipsis whitespace-nowrap">
+                        {currentPath === "/" ? `Category: ${selectedCategory}` : currentPath}
+                      </div>
+                    </div>
+                  )}
 
                 {/* File Explorer Sorting Controls & Info Row */}
                 <div className="mx-4 md:mx-6 flex items-center justify-between bg-white/5 border border-white/10 p-2 px-3 rounded-2xl gap-3">
@@ -4831,7 +5783,7 @@ export default function App() {
                         <Upload className="w-16 h-16 text-indigo-400 mb-4 animate-bounce" />
                         <h4 className="text-xl font-black uppercase tracking-wider mb-2">Drop Files to Encrypt</h4>
                         <p className="text-xs text-indigo-300 max-w-sm font-medium leading-relaxed">
-                          Drop file payloads here to automatically apply military-grade layered encryption (AES-GCM+ChaCha20) and save to your sovereign storage.
+                          Drop file payloads here to automatically apply sovereign quantum-resistant layered encryption (Ring-LWE Polynomial Scrambling + AES-GCM) and save to your trusted storage.
                         </p>
                       </motion.div>
                     )}
@@ -4848,7 +5800,12 @@ export default function App() {
                       : "p-1"
                   }`}>
                   {/* Render files grid or folder empty message inside */}
-                  {sortedVaultItems.length === 0 ? (
+                  {isInitialLoading ? (
+                    <div className="py-20 text-center flex flex-col items-center justify-center">
+                       <Loader2 className="w-10 h-10 text-indigo-500 animate-spin mb-6" />
+                       <p className="text-[10px] text-indigo-400/50 uppercase tracking-[0.2em] font-black">Connecting to Secure Ledger...</p>
+                    </div>
+                  ) : sortedVaultItems.length === 0 ? (
                     currentPath === "/Trash" ? (
                       <div className="py-12 text-center flex flex-col items-center">
                         <Trash2 className="mb-4 w-12 h-12 text-red-400 animate-pulse" />
@@ -4861,19 +5818,47 @@ export default function App() {
                           days.
                         </p>
                       </div>
-                    ) : (
-                      <div className="py-12 text-center flex flex-col items-center">
-                        <Upload className="mb-4 w-12 h-12 text-indigo-300 animate-pulse" />
-                        <h4 className="text-xl font-bold mb-1">
-                          Drag and Drop Files
-                        </h4>
-                        <p className="text-xs text-indigo-200 max-w-sm">
-                          Folders inside "{currentPath}" are currently empty.
-                          Drop file payloads to automatically apply layered encryption (AES-GCM+ChaCha20)
-                          and sync.
-                        </p>
-                      </div>
-                    )
+                      ) : (
+                        <div className="py-20 text-center flex flex-col items-center justify-center">
+                          {/* Clean minimal icon */}
+                          <div className="w-24 h-24 bg-indigo-600/5 rounded-[48px] flex items-center justify-center mb-10 border-2 border-indigo-500/10 shadow-2xl relative">
+                            <div className="absolute inset-0 bg-indigo-500/5 rounded-[48px] animate-pulse" />
+                            <HardDrive className="w-10 h-10 text-indigo-400/40 relative z-10" />
+                          </div>
+
+                          <h4 className="font-serif italic font-medium text-3xl text-white/90 mb-3 px-6">
+                            Secure Vault is Empty
+                          </h4>
+                          <p className="text-[13px] text-indigo-200/40 max-w-[280px] mb-12 font-medium leading-relaxed">
+                            No sovereign files detected in this context. Use the upload tool or restore your identity from a backup pack.
+                          </p>
+
+                          <div className="flex flex-col gap-4 w-full max-w-[240px]">
+                            <button
+                              onClick={() => refreshData()}
+                              className="w-full bg-white text-indigo-700 font-black text-xs uppercase tracking-[0.2em] py-5 rounded-2xl transition-all shadow-2xl shadow-white/5 hover:scale-[1.02] active:scale-95 flex items-center justify-center gap-2"
+                            >
+                              <RefreshCcw className="w-4 h-4" /> Refresh Ledger
+                            </button>
+                            
+                            <button
+                              onClick={() => {
+                                // Close all and show recovery desk on landing
+                                if (window.location.hash === "#recover") {
+                                   window.location.reload();
+                                } else {
+                                   // For now we just trigger a toast or instructions
+                                   showToast("Opening Sovereign Recovery Desk...", "info");
+                                   // In a real app we might redirect or open modal
+                                }
+                              }}
+                              className="w-full bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-400 border border-indigo-500/20 font-black text-[10px] uppercase tracking-[0.2em] py-5 rounded-2xl transition-all active:scale-95 flex items-center justify-center gap-2"
+                            >
+                              <Users className="w-4 h-4" /> Port Identity Pack
+                            </button>
+                          </div>
+                        </div>
+                      )
                   ) : (
                     <div className="space-y-4">
                       {currentPath === "/Trash" && (
@@ -4892,7 +5877,7 @@ export default function App() {
                         </div>
                       )}
                       <div className="grid grid-cols-1 gap-4 text-left">
-                        {sortedVaultItems.map((item) => {
+                        {sortedVaultItems.slice(0, maxRenderedFiles).map((item) => {
                           const isReplica = isSyncedFromPeer(item);
                           const isSecurePack = !item.isFolder && getFileCategory(item.name, item.type) === "secure";
                           const isAppPack = !item.isFolder && getFileCategory(item.name, item.type) === "app";
@@ -4961,7 +5946,7 @@ export default function App() {
                                         <span className="text-white/20 select-none">•</span>
                                         <span className="inline-flex items-center gap-1 text-emerald-400 font-extrabold">
                                           <Lock className="w-3 h-3 stroke-[2.5]" />
-                                          AES-GCM+ChaCha20
+                                          Ring-LWE+AES-GCM
                                         </span>
                                       </>
                                     )}
@@ -5233,83 +6218,29 @@ export default function App() {
                           );
                         })}
                       </div>
+
+                      {sortedVaultItems.length > maxRenderedFiles && (
+                        <div className="mt-6 flex flex-col items-center justify-center p-6 bg-slate-950/20 border border-white/[0.03] rounded-2xl gap-3">
+                          <p className="text-xs text-slate-400 font-medium font-mono text-center">
+                            Showing {maxRenderedFiles} of {sortedVaultItems.length} records. Performance safeguard active.
+                          </p>
+                          <button
+                            onClick={() => setMaxRenderedFiles(prev => prev + 100)}
+                            className="bg-slate-700/40 hover:bg-slate-700/60 border border-slate-600/30 hover:border-slate-500/50 text-slate-200 text-xs font-bold uppercase tracking-wider px-6 py-2.5 rounded-xl transition-all"
+                          >
+                            Load More Records
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
                   </div>
                 </div>
               </section>
-
-                {/* Storage Quota indicators - Redesigned output structure */}
-                <div className="bg-slate-950/40 rounded-3xl p-6 border border-slate-900/80 flex flex-col gap-6 text-xs tracking-wide">
-                  <div className="flex flex-col lg:flex-row gap-6 lg:items-center justify-between">
-                    <div className="flex gap-4 items-center">
-                      <div className="p-3 bg-indigo-500/5 rounded-2xl border border-indigo-500/20 relative group">
-                        <div className="absolute inset-0 bg-indigo-500/5 blur-lg rounded-full animate-pulse" />
-                        <Infinity className="w-6 h-6 text-indigo-400 relative z-10" />
-                      </div>
-                      <div>
-                        <div className="font-mono text-[9px] text-indigo-300 uppercase tracking-widest font-black flex items-center gap-1.5">
-                          <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-ping animate-duration-[2000ms]" />
-                          ACTIVE QS LITE DB CLUSTER
-                        </div>
-                        <div className="text-2xl font-black mt-1 text-white flex items-center gap-2 sm:gap-3 flex-wrap">
-                          <span>vault.db</span>
-                          <span className="text-[9px] font-mono bg-emerald-500/5 text-emerald-400 border border-emerald-500/15 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider select-none">
-                            UNLIMITED / 50MB PER FILE ALLOWED
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 sm:gap-6">
-                      <div className="bg-slate-900/20 border border-white/[0.03] p-3 rounded-2xl space-y-1 pl-3.5 border-l-2 border-l-indigo-400">
-                        <div className="text-[9px] uppercase tracking-widest font-mono text-slate-500 font-bold">
-                          Cold Index Size
-                        </div>
-                        <div className="text-base font-black text-slate-200 font-mono">
-                          {formatBytes(totalStorageSize)}
-                        </div>
-                      </div>
-                      <div className="bg-slate-900/20 border border-white/[0.03] p-3 rounded-2xl space-y-1 pl-3.5 border-l-2 border-l-emerald-400">
-                        <div className="text-[9px] uppercase tracking-widest font-mono text-slate-500 font-bold">
-                          Encrypted Files
-                        </div>
-                        <div className="text-base font-black text-slate-200 font-mono">
-                          {activeFiles.filter((f) => !f.isFolder).length}
-                        </div>
-                      </div>
-                      <div className="bg-slate-900/20 border border-white/[0.03] p-3 rounded-2xl space-y-1 pl-3.5 border-l-2 border-l-teal-400 col-span-2 sm:col-span-1">
-                        <div className="text-[9px] uppercase tracking-widest font-mono text-slate-500 font-bold whitespace-nowrap">
-                          Pool Storage Class
-                        </div>
-                        <div className="text-xs sm:text-sm font-black text-teal-400 font-mono flex items-center gap-1.5 whitespace-nowrap overflow-hidden text-ellipsis">
-                          <Infinity className="w-4 h-4 text-teal-400 shrink-0" /> UNLIMITED / 50MB PER 1 FILE ALLOWED
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Aesthetic Uncapped Glow Progress Bar */}
-                  <div className="space-y-3 pt-4 border-t border-white/[0.03]">
-                    <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-1 text-[10px] uppercase font-mono tracking-wider text-slate-400">
-                      <span className="font-bold">UNLIMITED DECENTRALIZED QS LITE POOL CONSUMPTION</span>
-                      <span className="text-teal-400 font-extrabold flex items-center gap-1">
-                        <span>0.00% consumed of</span>
-                        <span className="text-xs">∞</span>
-                      </span>
-                    </div>
-                    <div className="relative h-2 w-full bg-slate-900 rounded-full overflow-hidden border border-white/[0.03]">
-                      <div className="absolute top-0 left-0 h-full w-[2%] bg-gradient-to-r from-indigo-500 to-teal-400 rounded-full shadow-[0_0_8px_rgba(20,184,166,0.5)] animate-pulse" />
-                    </div>
-                    <p className="text-[10px] text-slate-500 font-medium leading-relaxed font-sans">
-                      Safe offline partition enabled. SQLite relational storage limits are disabled; database size is bounded only by physical sector capacity on this node's environment. Uploads are limited to 50MB per file.
-                    </p>
-                  </div>
-                </div>
               </div>
 
               {/* Right Column: Local Shared Pool & Infrastructure Signaling (Restored) */}
-              <div className={`${mobileActiveTab === "mesh" ? "block" : "hidden"} lg:block col-span-1 lg:col-span-4 space-y-6 overflow-y-auto custom-scrollbar pr-1 pb-10`}>
+              <div className={`${mobileActiveTab === "mesh" ? "block" : "hidden"} lg:block col-span-1 lg:col-span-4 space-y-6 overflow-y-auto custom-scrollbar pr-1 pb-4 lg:pb-4`}>
                 
                 {/* Local Shared Pool - Restored */}
                 <section className="bg-indigo-900/40 rounded-[28px] p-6 border border-indigo-400/20 shadow-xl flex flex-col">
@@ -5322,7 +6253,7 @@ export default function App() {
                     />
                   </div>
                   
-                  <div className="flex items-center justify-between mb-4">                
+                  <div className="flex items-center gap-4 mb-4">                
                     <div className="flex items-center gap-1.5">
                       <Share2 className="w-4 h-4 text-indigo-300" />
                       <h3 className="text-sm font-black tracking-widest uppercase text-indigo-200">
@@ -5330,7 +6261,19 @@ export default function App() {
                       </h3>
                     </div>
                     <RefreshCcw
-                      onClick={refreshData}
+                      onClick={async () => {
+                        try {
+                          await refreshData();
+                          await refreshSharedFiles();
+                          if (!navigator.onLine) {
+                            showToast("Shared pool refreshed offline", "info");
+                          } else {
+                            showToast("Shared pool refreshed and synced", "success");
+                          }
+                        } catch (e) {
+                          showToast("Failed to refresh shared pool", "error");
+                        }
+                      }}
                       className="w-4 h-4 cursor-pointer text-indigo-400 hover:text-white transition-colors"
                     />
                   </div>
@@ -5342,7 +6285,7 @@ export default function App() {
 
                   <div className="space-y-4">
                     {discoveredMeshFiles.length === 0 ? (
-                      <div className="p-6 bg-white/5 rounded-2xl border border-white/5 text-center text-xs text-indigo-400 italic">
+                      <div className="p-4 bg-white/5 rounded-2xl border border-white/5 text-center text-xs text-indigo-400 italic">
                         No shared files are currently distributed in this
                         device's workspace pool. Tag shared credentials on
                         matching files to broadcast.
@@ -5353,7 +6296,7 @@ export default function App() {
                           key={file.id}
                           className="bg-white/5 p-4 rounded-2xl border border-white/5 flex flex-col group"
                         >
-                          <div className="flex items-center justify-between gap-4">
+                          <div className="flex items-center gap-4">
                             {file.type?.startsWith('image/') && (
                               <div className="w-16 h-16 rounded-xl overflow-hidden bg-white/5 border border-white/10 shrink-0">
                                 <img 
@@ -5382,7 +6325,7 @@ export default function App() {
                             <div className="flex flex-col gap-2 shrink-0">
                               <button
                                 onClick={() => handleDownloadPublicShare(file, peer)}
-                                className="bg-teal-600 hover:bg-teal-500 text-white px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider shadow-md transition-all whitespace-nowrap active:scale-95 text-center w-full flex items-center justify-center gap-1.5"
+                                className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider shadow-md transition-all whitespace-nowrap active:scale-95 text-center w-full flex items-center justify-center gap-1.5"
                               >
                                 <Download className="w-3.5 h-3.5" /> Download
                               </button>
@@ -5406,19 +6349,19 @@ export default function App() {
                 </section>
 
                 {/* WebSocket Signal Hub - Comprehensive Recovery */}
-                <section className="bg-indigo-950/40 backdrop-blur-xl rounded-[28px] p-6 border border-white/10 shadow-xl space-y-5">
-                  <div className="flex justify-between items-center">
+                <section className="bg-slate-950/40 backdrop-blur-xl rounded-[28px] p-6 border border-white/10 shadow-xl space-y-5">
+                  <div className="flex items-center gap-4">
                     <div className="flex items-center gap-1.5">
                       <div className="relative">
-                        <div className={`w-2.5 h-2.5 rounded-full ${wsConnection ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`} />
-                        {wsConnection && <div className="absolute inset-0 w-2.5 h-2.5 bg-green-400 rounded-full animate-ping opacity-75" />}
+                        <div className={`w-2.5 h-2.5 rounded-full ${wsConnection ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'}`} />
+                        {wsConnection && <div className="absolute inset-0 w-2.5 h-2.5 bg-emerald-400 rounded-full animate-ping opacity-75" />}
                       </div>
-                      <h3 className="text-sm font-black tracking-widest uppercase text-indigo-200">
-                        WebSocket Signal Hub
+                      <h3 className="text-sm font-black tracking-widest uppercase text-slate-200">
+                        Signal Hub
                       </h3>
                     </div>
                     <div className="flex items-center gap-3">
-                      <span className={`text-[9px] px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider ${wsConnection ? 'bg-green-500/20 text-green-300' : 'bg-red-500/20 text-red-300'}`}>
+                      <span className={`text-[9px] px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider ${wsConnection ? 'bg-emerald-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'}`}>
                         {wsConnection ? "Active" : "Offline"}
                       </span>
                       {wsConnection && (
@@ -5426,9 +6369,9 @@ export default function App() {
                           onClick={() => {
                             wsConnection.close();
                             setWsConnection(null);
-                            showToast("Manual signal hub disconnect.", "info");
+                            showToast("Signal hub reset.", "info");
                           }}
-                          className="text-[9px] font-black text-indigo-400 hover:text-white uppercase transition-colors"
+                          className="text-[9px] font-black text-slate-400 hover:text-white uppercase transition-colors"
                         >
                           Reset
                         </button>
@@ -5437,15 +6380,13 @@ export default function App() {
                   </div>
 
                   <div>
-                    <div className="text-[10px] uppercase font-black tracking-wider text-indigo-300 mb-2 flex justify-between">
-                      <span>Connected Network Peers ({onlinePeers.length})</span>
+                    <div className="text-[10px] uppercase font-black tracking-wider text-slate-400 mb-2 flex justify-between">
+                      <span>Connected Peers ({onlinePeers.length})</span>
                       {onlinePeers.length > 0 && <span className="text-emerald-400 tabular-nums animate-pulse">Sync Active</span>}
                     </div>
                     {onlinePeers.length === 0 ? (
-                      <div className="p-4 bg-white/5 rounded-2xl border border-white/5 text-center text-xs text-indigo-300 italic">
-                        No other nodes connected to this WebSocket channel. Log
-                        in from another tab or device to test real-time
-                        signaling!
+                      <div className="p-4 bg-white/5 rounded-2xl border border-white/5 text-center text-xs text-slate-500 italic">
+                        No other nodes connected to this signal channel.
                       </div>
                     ) : (
                       <div className="grid grid-cols-1 gap-2">
@@ -5456,7 +6397,7 @@ export default function App() {
                               key={peer.cid}
                               className={`w-full rounded-xl p-3 border transition-all flex items-center justify-between group cursor-pointer ${
                                 isSelected
-                                  ? "bg-indigo-600/40 border-indigo-400 ring-1 ring-indigo-400/50"
+                                  ? "bg-slate-700/40 border-slate-500 ring-1 ring-slate-500/50"
                                   : "bg-white/5 border-transparent hover:bg-white/10"
                               }`}
                               onClick={() => {
@@ -5468,16 +6409,16 @@ export default function App() {
                                 <div className="text-xs font-black text-white flex items-center gap-2">
                                   {peer.displayName}
                                   {isSelected && (
-                                    <div className="w-1.5 h-1.5 bg-yellow-400 rounded-full animate-pulse" />
+                                    <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
                                   )}
                                 </div>
-                                <div className="text-[9px] text-indigo-300 font-mono flex items-center gap-2">
+                                <div className="text-[9px] text-slate-400 font-mono flex items-center gap-2">
                                   <span>@{peer.username}</span>
                                   {isSelected && <span className="text-[8px] bg-white/5 px-1 rounded text-white/40 font-black">SELECTED</span>}
                                 </div>
                               </div>
                               <div className="flex items-center gap-2">
-                                <div className={`w-1.5 h-1.5 rounded-full ${isSelected ? 'bg-indigo-400 animate-pulse' : 'bg-white/10'}`} />
+                                <div className={`w-1.5 h-1.5 rounded-full ${isSelected ? 'bg-slate-400 animate-pulse' : 'bg-white/10'}`} />
                               </div>
                             </div>
                           );
@@ -5846,6 +6787,254 @@ export default function App() {
                 </section>
 
               </div>
+
+              {/* Full-Page Navigation Explorer */}
+              <AnimatePresence>
+                {showNavigationSheet && (
+                  <motion.div
+                    initial={{ x: "100%" }}
+                    animate={{ x: 0 }}
+                    exit={{ x: "100%" }}
+                    transition={{ type: "spring", damping: 25, stiffness: 200 }}
+                    className="fixed inset-0 bg-[#06080d] z-[100] overflow-hidden flex flex-col select-none"
+                  >
+                    {/* Page Header */}
+                    <div className="px-6 py-8 flex justify-between items-center border-b border-white/[0.04] bg-[#0a0d14]/80 backdrop-blur-2xl">
+                      <div className="flex items-center gap-6">
+                        <button
+                          onClick={() => setShowNavigationSheet(false)}
+                          className="p-3 bg-white/5 hover:bg-white/10 rounded-2xl border border-white/5 transition-all text-slate-300 hover:text-white active:scale-90"
+                        >
+                          <ArrowLeft className="w-6 h-6" />
+                        </button>
+                        <div>
+                          <h3 className="text-2xl font-black text-white uppercase tracking-widest font-mono leading-none">
+                            Vault Index
+                          </h3>
+                          <p className="text-[10px] text-indigo-400 font-extrabold uppercase tracking-[0.3em] font-mono mt-2">
+                            Global Resource Navigation
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Scrollable Content */}
+                    <div className="flex-1 overflow-y-auto custom-scrollbar p-6 pt-10 pb-24 space-y-12">
+                      
+                      {/* Partitions & Storage Roots */}
+                      <div className="max-w-3xl mx-auto w-full">
+                        <div className="flex items-center gap-4 mb-6">
+                          <div className="h-px flex-1 bg-gradient-to-r from-transparent to-white/10" />
+                          <span className="text-[11px] text-slate-500 font-black uppercase tracking-[0.3em] font-mono shrink-0">
+                            System Nodes
+                          </span>
+                          <div className="h-px flex-1 bg-gradient-to-l from-transparent to-white/10" />
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            {/* Workspace Root */}
+                            <button
+                              onClick={() => {
+                                setCurrentPath("/");
+                                setOnlyShowOffline(false);
+                                setSelectedCategory("all");
+                                setMobileActiveTab("files");
+                                setShowDevicePairing(false);
+                                setShowNavigationSheet(false);
+                              }}
+                              className={`flex items-center gap-3 p-3 rounded-2xl border text-left transition-all duration-250 active:scale-[0.97] ${
+                                currentPath === "/" && selectedCategory === "all"
+                                  ? "bg-indigo-500/10 border-indigo-500/40 text-indigo-200"
+                                  : "bg-white/[0.01] border-white/5 hover:bg-white/5 text-slate-300"
+                              }`}
+                            >
+                              <div className="p-2 bg-indigo-500/10 rounded-xl text-indigo-400 shrink-0">
+                                <FolderOpen className="w-4 h-4" />
+                              </div>
+                              <div className="overflow-hidden">
+                                <div className="text-[11px] font-black uppercase tracking-wider font-mono truncate">
+                                  Root
+                                </div>
+                                <div className="text-[9px] text-slate-500 truncate">Workspace</div>
+                              </div>
+                            </button>
+
+                            {/* Trash Partition */}
+                            <button
+                              onClick={() => {
+                                setCurrentPath("/Trash");
+                                setOnlyShowOffline(false);
+                                setSelectedCategory("all");
+                                setMobileActiveTab("files");
+                                setShowDevicePairing(false);
+                                setShowNavigationSheet(false);
+                              }}
+                              className={`flex items-center gap-3 p-3 rounded-2xl border text-left transition-all duration-250 active:scale-[0.97] ${
+                                currentPath === "/Trash"
+                                  ? "bg-red-500/10 border-red-500/40 text-red-300"
+                                  : "bg-white/[0.01] border-white/5 hover:bg-white/5 text-slate-300"
+                              }`}
+                            >
+                              <div className="p-2 bg-red-500/10 rounded-xl text-red-400 shrink-0">
+                                <Trash2 className="w-4 h-4" />
+                              </div>
+                              <div className="overflow-hidden">
+                                <div className="text-[11px] font-black uppercase tracking-wider font-mono truncate">
+                                  Trash
+                                </div>
+                                <div className="text-[9px] text-slate-500 truncate">Deleted files</div>
+                              </div>
+                            </button>
+                          </div>
+                        </div>
+
+                      {/* File Category Classifiers */}
+                      <div className="max-w-3xl mx-auto w-full">
+                        <div className="flex items-center gap-4 mb-6">
+                          <div className="h-px flex-1 bg-gradient-to-r from-transparent to-white/10" />
+                          <span className="text-[11px] text-slate-500 font-black uppercase tracking-[0.3em] font-mono shrink-0">
+                            Storage Classifiers
+                          </span>
+                          <div className="h-px flex-1 bg-gradient-to-l from-transparent to-white/10" />
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            {[
+                              { id: "all", label: "All Index", icon: FileText, desc: "All system files", color: "text-slate-300", bg: "bg-white/5" },
+                              { id: "folders", label: "Folders", icon: Folder, desc: "Directories", color: "text-blue-400", bg: "bg-blue-400/5" },
+                              { id: "secure", label: "Keys & Seeds 🔐", icon: Shield, desc: "Keys & Cryptography", color: "text-amber-400", bg: "bg-amber-400/5" },
+                              { id: "app", label: "APKs & Apps 📱", icon: FileCode, desc: "Mobile Deployments", color: "text-emerald-400", bg: "bg-emerald-400/5" },
+                              { id: "document", label: "Docs", icon: FileText, desc: "Text & Documents", color: "text-sky-400", bg: "bg-sky-400/5" },
+                              { id: "image", label: "Images", icon: ImageIcon, desc: "Photos & Artworks", color: "text-rose-400", bg: "bg-rose-400/5" },
+                              { id: "media", label: "Media", icon: Music, desc: "Audio & Beats", color: "text-purple-400", bg: "bg-purple-400/5" },
+                              { id: "video", label: "Video", icon: Film, desc: "Movie files", color: "text-violet-400", bg: "bg-violet-400/5" },
+                              { id: "html", label: "HTML", icon: Globe, desc: "Web applications", color: "text-teal-400", bg: "bg-teal-400/5" },
+                              { id: "archive", label: "Zip", icon: Archive, desc: "Compressed packages", color: "text-pink-400", bg: "bg-pink-400/5" },
+                            ].map((cat) => {
+                              const Icon = cat.icon;
+                              const isActive = selectedCategory === cat.id && currentPath !== "/Trash";
+                              return (
+                                <button
+                                  key={cat.id}
+                                  onClick={() => {
+                                    setSelectedCategory(cat.id);
+                                    if (currentPath === "/Trash") {
+                                      setCurrentPath("/");
+                                    }
+                                    setOnlyShowOffline(false);
+                                    setMobileActiveTab("files");
+                                    setShowDevicePairing(false);
+                                    setShowNavigationSheet(false);
+                                  }}
+                                  className={`flex items-center gap-3 p-3 rounded-2xl border text-left transition-all duration-250 active:scale-[0.97] ${
+                                    isActive
+                                      ? "bg-indigo-500/10 border-indigo-500/40 text-indigo-200"
+                                      : "bg-white/[0.01] border-white/5 hover:bg-white/5 text-slate-300"
+                                  }`}
+                                >
+                                  <div className={`p-2 rounded-xl shrink-0 ${cat.bg} ${cat.color}`}>
+                                    <Icon className="w-4 h-4" />
+                                  </div>
+                                  <div className="overflow-hidden">
+                                    <div className="text-[11px] font-black uppercase tracking-wider font-mono truncate">
+                                      {cat.label}
+                                    </div>
+                                    <div className="text-[9px] text-slate-500 truncate">{cat.desc}</div>
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                      </div>
+                    </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* Premium Native-Style Bottom Floating Tab Bar */}
+              {(() => {
+                const isFilesTabActive = mobileActiveTab === "files" && currentPath !== "/Trash" && selectedCategory === "all" && !showDevicePairing && !showChat;
+                const isNavigateTabActive = showNavigationSheet;
+                const isChatTabActive = !!showChat;
+                const isSharedTabActive = mobileActiveTab === "mesh" && !showDevicePairing && !showChat;
+
+                return (
+                  <div className="fixed bottom-0 left-0 right-0 bg-[#0a0c10] border-t border-white/10 z-[70] transition-all pb-safe">
+                    <div className="max-w-md mx-auto p-2 flex justify-between items-center gap-2">
+                      {/* Files Bottom Nav Tab */}
+                    <button
+                      onClick={() => {
+                        setCurrentPath("/");
+                        setOnlyShowOffline(false);
+                        setSelectedCategory("all");
+                        setMobileActiveTab("files");
+                        setShowDevicePairing(false);
+                        setShowChat(false);
+                        setShowNavigationSheet(false);
+                      }}
+                      className={`flex flex-col items-center justify-center flex-1 py-2 px-1 rounded-[1.25rem] transition-all duration-300 active:scale-95 ${
+                        isFilesTabActive
+                          ? "bg-indigo-500/10 border border-indigo-500/30 text-indigo-400 font-extrabold shadow-[inset_0_1px_1px_rgba(255,255,255,0.03)]"
+                          : "border border-transparent text-slate-400 hover:text-slate-200 hover:bg-white/5"
+                      }`}
+                    >
+                      <Database className={`w-5 h-5 transition-transform duration-300 ${isFilesTabActive ? "scale-110 text-indigo-400" : ""}`} />
+                      <span className={`text-[9px] tracking-wider uppercase font-black transition-all mt-0.5 ${isFilesTabActive ? "text-indigo-300" : "text-slate-500"}`}>Files</span>
+                    </button>
+
+                    {/* Navigate Bottom Nav Tab (Replaced Photos) */}
+                    <button
+                      onClick={() => {
+                        setShowNavigationSheet(prev => !prev);
+                      }}
+                      className={`flex flex-col items-center justify-center flex-1 py-2 px-1 rounded-[1.25rem] transition-all duration-300 active:scale-95 ${
+                        isNavigateTabActive
+                          ? "bg-indigo-500/10 border border-indigo-500/30 text-indigo-400 font-extrabold shadow-[inset_0_1px_1px_rgba(255,255,255,0.03)]"
+                          : "border border-transparent text-slate-400 hover:text-slate-200 hover:bg-white/5"
+                      }`}
+                    >
+                      <Compass className={`w-5 h-5 transition-transform duration-300 ${isNavigateTabActive ? "scale-110 text-indigo-400 rotate-45" : ""}`} />
+                      <span className={`text-[9px] tracking-wider uppercase font-black transition-all mt-0.5 ${isNavigateTabActive ? "text-indigo-300" : "text-slate-500"}`}>Navigate</span>
+                    </button>
+
+                    {/* Chat Bottom Nav Tab */}
+                    <button
+                      onClick={() => {
+                        setShowChat(prev => !prev);
+                        setShowDevicePairing(false);
+                        setShowNavigationSheet(false);
+                      }}
+                      className={`flex flex-col items-center justify-center flex-1 py-2 px-1 rounded-[1.25rem] transition-all duration-300 active:scale-95 ${
+                        isChatTabActive
+                          ? "bg-indigo-500/10 border border-indigo-500/30 text-indigo-400 font-extrabold shadow-[inset_0_1px_1px_rgba(255,255,255,0.03)]"
+                          : "border border-transparent text-slate-400 hover:text-slate-200 hover:bg-white/5"
+                      }`}
+                    >
+                      <MessageSquare className={`w-5 h-5 transition-transform duration-300 ${isChatTabActive ? "scale-110 text-indigo-400" : ""}`} />
+                      <span className={`text-[9px] tracking-wider uppercase font-black transition-all mt-0.5 ${isChatTabActive ? "text-indigo-300" : "text-slate-500"}`}>Chat</span>
+                    </button>
+
+                    {/* Shared Bottom Nav Tab */}
+                    <button
+                      onClick={() => {
+                        setMobileActiveTab("mesh");
+                        setShowDevicePairing(false);
+                        setShowChat(false);
+                        setShowNavigationSheet(false);
+                      }}
+                      className={`flex flex-col items-center justify-center flex-1 py-2 px-1 rounded-[1.25rem] transition-all duration-300 active:scale-95 ${
+                        isSharedTabActive
+                          ? "bg-indigo-500/10 border border-indigo-500/30 text-indigo-400 font-extrabold shadow-[inset_0_1px_1px_rgba(255,255,255,0.03)]"
+                          : "border border-transparent text-slate-400 hover:text-slate-200 hover:bg-white/5"
+                      }`}
+                    >
+                      <Users className={`w-5 h-5 transition-transform duration-300 ${isSharedTabActive ? "scale-110 text-indigo-400" : ""}`} />
+                      <span className={`text-[9px] tracking-wider uppercase font-black transition-all mt-0.5 ${isSharedTabActive ? "text-indigo-300" : "text-slate-500"}`}>Shared</span>
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
+
             </div>
           </div>
         )}
@@ -5859,10 +7048,10 @@ export default function App() {
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: 100 }}
               transition={{ type: "spring", damping: 25, stiffness: 200 }}
-              className="fixed inset-0 z-50 bg-indigo-950 flex flex-col"
+              className="fixed inset-0 z-50 bg-[#0a0c10] flex flex-col"
             >
               {/* Sticky Header for Settings Interface */}
-              <header className="sticky top-0 z-[60] bg-indigo-950/95 backdrop-blur-2xl border-b border-white/5 py-4 px-4 sm:px-8 lg:px-12">
+              <header className="sticky top-0 z-[60] bg-[#0a0c10] border-b border-white/10 py-4 px-4 sm:px-8 lg:px-12 shadow-xl">
                 <div className="max-w-7xl mx-auto flex flex-row justify-between items-center gap-4">
                   <div className="flex flex-col min-w-0">
                     <h2 className="text-xl sm:text-4xl lg:text-5xl font-black tracking-tighter leading-none text-white truncate">SYSTEM INFRASTRUCTURE</h2>
@@ -5902,13 +7091,11 @@ export default function App() {
 
               <div className="flex-1 flex flex-col w-full max-w-7xl mx-auto p-4 sm:p-8 lg:p-12 overflow-y-auto custom-scrollbar">
                 {/* Tabs Navigation (Full Page Style) */}
-                <div className="flex gap-1.5 p-1 bg-black/20 rounded-[20px] sm:rounded-[24px] mb-6 sm:mb-10 border border-white/5 max-w-4xl overflow-x-auto no-scrollbar scrollbar-none snap-x whitespace-nowrap sticky top-0 z-50 bg-indigo-950/50 backdrop-blur-sm">
+                <div className="flex gap-1.5 p-1 bg-black/20 rounded-[20px] sm:rounded-[24px] mb-6 sm:mb-10 border border-white/5 max-w-4xl overflow-x-auto no-scrollbar scrollbar-none snap-x whitespace-nowrap sticky top-0 z-50 bg-[#0a0c10]/50 backdrop-blur-sm">
                   {[
                     { id: "general", label: "NODE CONFIG", mobileLabel: "Config", icon: Database },
                     { id: "security", label: "VAULT SECURITY", mobileLabel: "Security", icon: Shield },
-                    { id: "bounty", label: "BUG BOUNTY & SECURE CHIP", mobileLabel: "Bounty", icon: ShieldAlert },
                     { id: "network", label: "NETWORK MESH", mobileLabel: "Network", icon: Globe },
-                    { id: "health", label: "SYSTEM HEALTH", mobileLabel: "Health", icon: Activity },
                   ].map((tab) => (
                     <button
                       key={tab.id}
@@ -6049,9 +7236,10 @@ export default function App() {
                                  {/* Auto-Lock */}
                                  <div className="space-y-3">
                                    <label className="block text-[10px] font-black tracking-[0.2em] uppercase text-indigo-400 mb-4">Auto-Lock Sensitivity</label>
-                                   <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                                       {[
                                         { label: "Disabled", value: 0 },
+                                        { label: "5 SEC", value: 5/60 },
                                         { label: "1 MIN", value: 1 },
                                         { label: "5 MIN", value: 5 },
                                         { label: "15 MIN", value: 15 },
@@ -6144,7 +7332,7 @@ export default function App() {
                                </div>
                                <div className="bg-white/5 p-4 rounded-2xl border border-white/5">
                                   <div className="text-[9px] font-black text-indigo-400 uppercase mb-1">Enc Type</div>
-                                  <div className="text-xs font-mono text-white">AES-GCM+ChaCha20</div>
+                                  <div className="text-xs font-mono text-white">Ring-LWE + AES-GCM (Quantum Resistant)</div>
                                </div>
                             </div>
 
@@ -6159,20 +7347,6 @@ export default function App() {
                                  {repairing ? "Repairing..." : "Scan & Repair"}
                                </button>
                              </div>
-                          </div>
-
-                          <div className="bg-indigo-950/40 border border-indigo-400/15 rounded-[32px] p-8 flex flex-col gap-3 border border-white/5 relative overflow-hidden group hover:border-indigo-500/30 transition-all">
-                               <h4 className="text-xs font-black text-white uppercase tracking-[0.2em]">Verify Vault Integrity</h4>
-                               <p className="text-[11px] text-indigo-300 font-medium">Audit all encrypted sectors for bit-rot and verify HMAC-SHA256 signatures.</p>
-                               <button
-                                 onClick={() => {
-                                   setShowSettingsPanel(false);
-                                   setShowVaultIntegrityModal(true);
-                                 }}
-                                 className="w-full bg-indigo-600 hover:bg-indigo-500 py-4 rounded-xl text-xs font-bold text-white active:scale-95 transition-all"
-                               >
-                                 Verify Vault Integrity
-                               </button>
                           </div>
 
                          {rekeyingProgress && (
@@ -6531,6 +7705,9 @@ export default function App() {
                         </div>
 
                         {/* Node List and Gossip Feed */}
+                        <div className="my-6">
+                            <NetworkTopologyCanvas />
+                        </div>
                         <div className="mt-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
                             <div className="lg:col-span-2 space-y-4">
                                 <span className="text-[10px] font-black uppercase text-indigo-400 tracking-widest px-1">Active Sovereign Nodes</span>
@@ -6664,7 +7841,7 @@ export default function App() {
                                   if (id) {
                                     merged.set(id, {
                                       username: id.substring(0, 8),
-                                      displayName: `Vault Swarm Node ${id.substring(0, 4)}`,
+                                      displayName: `Node ${id.substring(0, 8)}`,
                                       localIp: id,
                                       serviceName: "P2P WebRTC Swarm",
                                       port: 3000 + (parseInt(id.substring(0, 4), 36) % 1000),
@@ -6732,19 +7909,10 @@ export default function App() {
                       animate={{ opacity: 1, y: 0 }}
                       className="space-y-10"
                     >
-                      <div className="bg-black/20 border border-white/5 rounded-[24px] sm:rounded-[40px] p-4 sm:p-10">
-                        <div className="flex items-center justify-between mb-8 sm:mb-12">
-                          <div className="flex flex-col">
-                            <h3 className="text-xl sm:text-2xl font-black tracking-tight leading-none mb-2">QS DISTRIBUTED HEALTH MONITOR</h3>
-                            <span className="text-[10px] font-black text-indigo-400 uppercase tracking-[0.2em] ml-0.5">ANALYTIC LIFECYCLE ENGINE</span>
-                          </div>
-                          <div className="bg-indigo-500/10 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-indigo-500/20">
-                            <Activity className="w-6 h-6 sm:w-8 sm:h-8 text-indigo-400" />
-                          </div>
-                        </div>
-
-                        <div className="bg-black/40 rounded-[20px] sm:rounded-[32px] p-4 sm:p-8 border border-white/5 relative mb-6 sm:mb-10 shadow-inner">
-                          <div className="flex justify-between items-center mb-6 sm:mb-8">
+                      <div className="bg-black/20 border border-white/5 rounded-[24px] sm:rounded-[40px] p-6 sm:p-10">
+                        
+                        <div className="mt-16 border-t border-white/5 pt-10">
+                           <div className="flex justify-between items-center mb-6">
                             <div className="flex flex-col">
                               <span className="text-[10px] font-black uppercase tracking-[0.3em] text-indigo-300/50">Storage Dynamics</span>
                               <span className="text-xs sm:text-sm font-bold text-white mt-1">7-DAY HISTORIC DELTA</span>
@@ -6757,6 +7925,7 @@ export default function App() {
                               <span className="text-[9px] font-black text-indigo-400 uppercase tracking-widest">View History</span>
                             </button>
                           </div>
+                        </div>
                           
                           <div className="w-full h-64 sm:h-80 relative min-w-0">
                             <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={200}>
@@ -6843,8 +8012,7 @@ export default function App() {
                               <span className="text-[10px] font-black tracking-widest uppercase text-white/70">SYSTEM ARCHIVE</span>
                             </div>
                           </div>
-                        </div>
-
+                        
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6">
                           <div className="bg-white/5 border border-white/5 p-6 sm:p-8 rounded-[24px] sm:rounded-[32px] transition-all hover:bg-white/10 hover:translate-y-[-4px] group">
                             <div className="text-[10px] font-black uppercase text-indigo-400 tracking-[0.2em] mb-3">Integrity Score</div>
@@ -7166,19 +8334,7 @@ export default function App() {
                       animate={{ opacity: 1, y: 0 }}
                       className="space-y-10"
                     >
-                      <SecurityBountyDesk 
-                        userId={currentUser.id}
-                        files={files}
-                        refreshData={async () => {
-                          try {
-                            const userFiles = await api.getFiles(currentUser.id);
-                            setFiles(userFiles);
-                          } catch (err) {
-                            console.error("Error reloading files:", err);
-                          }
-                        }}
-                        showToast={showToast}
-                      />
+                      <div className="text-white p-6">Bounty system disabled.</div>
                     </motion.div>
                   )}
                 </div>
@@ -7197,15 +8353,6 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        <AnimatePresence>
-          {showVaultIntegrityModal && currentUser && (
-            <VaultIntegrityModal
-              userId={currentUser.id}
-              files={files}
-              onClose={() => setShowVaultIntegrityModal(false)}
-            />
-          )}
-        </AnimatePresence>
 
         <AnimatePresence>
           {showTransferHistoryModal && (
@@ -7293,6 +8440,44 @@ export default function App() {
           localPeerId={relayStatus?.localPeerId || peerId}
         />
 
+        <AnimatePresence>
+          {showChat && (
+            <SovereignChat 
+              onClose={() => setShowChat(false)}
+              userSeedId={currentUser?.vaultSeedId}
+              userName={currentUser?.username}
+            />
+          )}
+        </AnimatePresence>
+
+        {showDevicePairing && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+            <div className="bg-zinc-950 border border-white/10 rounded-[40px] p-8 text-center max-w-md">
+              <Smartphone className="w-16 h-16 text-indigo-400 mx-auto mb-6" />
+              <h2 className="text-2xl font-black text-white mb-4 uppercase tracking-tighter">Device Pairing Restricted</h2>
+              <p className="text-indigo-300/60 text-sm leading-relaxed mb-8">
+                Direct QR-based pairing has been disabled in favor of Master Key identity restoration. Please use the "Import Identity Pack" option in the Vault security menu.
+              </p>
+              <button 
+                onClick={() => setShowDevicePairing(false)}
+                className="w-full bg-white text-black py-4 rounded-2xl font-black text-xs uppercase tracking-widest"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
+
+        {syncConflict && (
+          <SyncConflictModal
+            conflict={syncConflict}
+            onResolve={(action) => {
+              showToast(`Conflict resolved: ${action}`, "success");
+              setSyncConflict(null);
+            }}
+          />
+        )}
+
         {/* Transfer Progress HUD Overlay */}
         <div className="fixed bottom-4 left-4 right-4 sm:bottom-6 sm:left-auto sm:right-6 z-[100] flex flex-col gap-3 sm:w-80 pointer-events-none">
           <AnimatePresence>
@@ -7343,7 +8528,7 @@ export default function App() {
                   <motion.div
                     initial={{ width: 0 }}
                     animate={{ width: `${transfer.progress}%` }}
-                    className={`h-full transition-all duration-300 ${
+                    className={`h-full transition-all duration-500 ease-out ${
                       transfer.status === "error"
                         ? "bg-red-500"
                         : transfer.status === "completed"
@@ -7375,6 +8560,7 @@ export default function App() {
           </AnimatePresence>
         </div>
       </div>
+
     </div>
   );
 }

@@ -8,11 +8,13 @@ export interface UserProfile {
   avatarColor?: string;
   autoLockInterval?: number;
   vaultSeedId?: string;
+  privateVaultId?: string;
 }
 
 export interface FileData {
   id?: number;
   userId: number; // reference to UserProfile.id
+  privateVaultId?: string; // Private unique identity for this file's owner
   name: string;
   data: ArrayBuffer;
   type: string;
@@ -35,4 +37,9 @@ export interface FileData {
   originalOwnerSeedId?: string | null;
   peerReceiverSeedId?: string | null;
   originalId?: number;
+  merkleRoot?: string;
+  isOfflineOnly?: boolean; // true = never show when online
+  createdOffline?: boolean;
+  lastSynced?: number | null;
+  syncStatus?: 'pending' | 'synced' | 'conflict' | 'local-only';
 }

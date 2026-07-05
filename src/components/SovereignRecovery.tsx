@@ -2,7 +2,6 @@ import React, { useState, useEffect } from "react";
 import { 
   ShieldCheck, 
   Key, 
-  QrCode, 
   Copy, 
   Check, 
   RefreshCw, 
@@ -13,12 +12,10 @@ import {
   AlertCircle,
   Lock,
   Unlock,
-  Smartphone
+  Smartphone,
+  Download
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
-import { QRCodeSVG } from "qrcode.react";
-import { QRColdStorage } from "./QRColdStorage";
-import { QRScannerOverlay } from "./QRScannerOverlay";
 import { split, reconstruct, SSSShare } from "../lib/sss";
 
 const WORD_LIST = [
@@ -48,12 +45,39 @@ export function SovereignRecovery({
   const [mnemonic, setMnemonic] = useState<string[]>(() => JSON.parse(localStorage.getItem("sovereign-recovery-mnemonic") || "[]"));
   const [masterKey, setMasterKey] = useState(() => localStorage.getItem("sovereign-recovery-masterKey") || initialKey || "");
   const [shards, setShards] = useState<SSSShare[]>([]); // These are transient during shredding, maybe don't persist
-  const [scannedShards, setScannedShards] = useState<SSSShare[]>([]); // Shards should probably not be persisted in localStorage as plaintext
+  const [scannedShards, setScannedShards] = useState<SSSShare[]>(() => {
+    try {
+      const saved = sessionStorage.getItem("sovereign-recovery-scannedShards");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return parsed.map((s: any) => ({
+          x: s.x,
+          data: new Uint8Array(s.data)
+        }));
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    return [];
+  });
   const [reconstructedKey, setReconstructedKey] = useState<string | null>(() => localStorage.getItem("sovereign-recovery-reconstructedKey"));
   const [isCopied, setIsCopied] = useState(false);
   const [isBroadcasting, setIsBroadcasting] = useState(false);
-  const [showQRScanner, setShowQRScanner] = useState(false);
-  const [showColdStorage, setShowColdStorage] = useState(false);
+
+
+  useEffect(() => {
+    try {
+      const serialized = scannedShards.map(s => ({
+        x: s.x,
+        data: Array.from(s.data)
+      }));
+      sessionStorage.setItem("sovereign-recovery-scannedShards", JSON.stringify(serialized));
+    } catch (e) {
+      console.error(e);
+    }
+  }, [scannedShards]);
+
+
 
   useEffect(() => {
     localStorage.setItem("sovereign-recovery-activeStep", activeStep);
@@ -302,11 +326,22 @@ export function SovereignRecovery({
 
               <div className="flex gap-3 pt-4">
                 <button 
-                  onClick={() => setShowColdStorage(true)}
+                  onClick={() => {
+                    const text = mnemonic.join(" ");
+                    const blob = new Blob([text], { type: "text/plain" });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `vault_master_seed_${Date.now()}.txt`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                  }}
                   className="bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 h-12 px-4 rounded-xl flex items-center justify-center gap-2 text-xs font-black text-emerald-400 uppercase transition-all"
                 >
-                  <QrCode className="w-4 h-4" />
-                  QR Cold Storage
+                  <Download className="w-4 h-4" />
+                  Download Seed File
                 </button>
                 <button 
                   onClick={() => copyToClipboard(mnemonic.join(" "))}
@@ -325,13 +360,7 @@ export function SovereignRecovery({
             </motion.div>
           )}
 
-          {showColdStorage && (
-            <div className="absolute inset-0 z-50 bg-black/80 flex items-center justify-center p-6" onClick={() => setShowColdStorage(false)}>
-              <div onClick={e => e.stopPropagation()}>
-                <QRColdStorage data={mnemonic.join(" ")} title="Vault Seed QR" onClose={() => setShowColdStorage(false)} />
-              </div>
-            </div>
-          )}
+
 
           {activeStep === "shred" && (
             <motion.div 
@@ -377,25 +406,35 @@ export function SovereignRecovery({
                   <div className="grid grid-cols-1 gap-4 h-[300px] overflow-y-auto pr-2 custom-scrollbar">
                     {shards.map((shard, i) => (
                       <div key={i} className="bg-white/5 border border-white/5 p-4 rounded-2xl flex items-center gap-4">
-                        <div className="w-24 h-24 bg-white p-2 rounded-xl shrink-0">
-                          <QRCodeSVG 
-                            value={JSON.stringify({ 
-                              x: shard.x, 
-                              d: btoa(Array.from(shard.data).map((b: number) => String.fromCharCode(b)).join('')) 
-                            })}
-                            size={80}
-                            level="M"
-                            includeMargin={false}
-                          />
-                        </div>
                         <div className="flex-1 space-y-2">
                           <div className="flex items-center justify-between">
                             <span className="text-[10px] font-black text-amber-400 uppercase tracking-widest">Shard #{shard.x}</span>
                             <span className="text-[9px] font-mono text-white/20">Ed25519-SSS-256</span>
                           </div>
                           <p className="text-[10px] text-indigo-200/40 leading-relaxed italic">
-                            Distribute this QR to Guardian #{shard.x}. They must scan this to store a fragment of your identity.
+                            Distribute this file to Guardian #{shard.x}. They must load this to restore a fragment of your identity.
                           </p>
+                          <button
+                            onClick={() => {
+                              const shardData = JSON.stringify({ 
+                                x: shard.x, 
+                                d: btoa(Array.from(shard.data).map((b: number) => String.fromCharCode(b)).join('')) 
+                              });
+                              const blob = new Blob([shardData], { type: "text/plain" });
+                              const url = URL.createObjectURL(blob);
+                              const a = document.createElement("a");
+                              a.href = url;
+                              a.download = `guardian_shard_${shard.x}_${Date.now()}.txt`;
+                              document.body.appendChild(a);
+                              a.click();
+                              document.body.removeChild(a);
+                              URL.revokeObjectURL(url);
+                            }}
+                            className="bg-indigo-600 hover:bg-indigo-500 transition-colors text-white text-[10px] font-black uppercase tracking-widest px-4 py-2 rounded-lg flex items-center justify-center gap-2 mt-2 w-full"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            Download Shard File
+                          </button>
                         </div>
                       </div>
                     ))}
@@ -482,13 +521,29 @@ export function SovereignRecovery({
                     <div className="bg-black/30 border border-white/5 p-5 rounded-2xl space-y-4">
                       <div className="flex items-center justify-between">
                         <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest">Guardian Shard Entry</span>
-                        <button 
-                          onClick={() => setShowQRScanner(true)}
-                          className="flex items-center gap-2 hover:bg-white/5 px-2 py-1 rounded-lg transition-colors cursor-pointer"
-                        >
-                          <Camera className="w-3.5 h-3.5 text-indigo-400" />
-                          <span className="text-[10px] font-bold text-indigo-400">Scan QR</span>
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <label className="flex items-center gap-2 hover:bg-white/5 px-2 py-1 rounded-lg transition-colors cursor-pointer">
+                            <input 
+                              type="file" 
+                              className="hidden" 
+                              accept=".txt"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (!file) return;
+                                const reader = new FileReader();
+                                reader.onload = (ev) => {
+                                  if (ev.target?.result) {
+                                    addScannedShard(ev.target.result as string);
+                                  }
+                                };
+                                reader.readAsText(file);
+                                e.target.value = '';
+                              }}
+                            />
+                            <Download className="w-3.5 h-3.5 text-indigo-400 rotate-180" />
+                            <span className="text-[10px] font-bold text-indigo-400">Open Seed File</span>
+                          </label>
+                        </div>
                       </div>
                       <textarea 
                         placeholder="Paste raw shard ciphertext or scan output..."
@@ -541,17 +596,7 @@ export function SovereignRecovery({
           )}
         </AnimatePresence>
 
-        <AnimatePresence>
-          {showQRScanner && (
-            <QRScannerOverlay
-              onScan={(scannedText) => {
-                setShowQRScanner(false);
-                addScannedShard(scannedText);
-              }}
-              onClose={() => setShowQRScanner(false)}
-            />
-          )}
-        </AnimatePresence>
+
       </div>
 
       {/* Info Footer */}

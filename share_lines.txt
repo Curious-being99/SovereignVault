@@ -1,0 +1,60 @@
+242:  const [shareDialogOptions, setShareDialogOptions] = useState<{
+249:  const [shareDropdownOpen, setShareDropdownOpen] = useState(false);
+255:    mode: "share" | "private";
+262:    mode: "share",
+2117:          } else if (msg.type === "share_request") {
+2134:            showToast(`New share request from @${msg.senderUsername}!`, "info");
+2135:          } else if (msg.type === "share_response") {
+2137:              showToast(`@${msg.senderUsername} accepted your share request for file "${msg.fileName}".`, "success");
+2147:              showToast(`@${msg.senderUsername} rejected your share request for file "${msg.fileName}".`, "info");
+3330:      setPublicShareDialog({ file, open: true, passwordInput: "", mode: "share" });
+3349:      if (mode === "share") {
+3414:      setPublicShareDialog({ file: null, open: false, passwordInput: "", mode: "share", isProcessing: false, progress: 0 });
+3418:      showToast(`Failed to ${mode === "share" ? "share" : "secure"} file.`, "error");
+3423:    const { file, note, targetUsername } = shareDialogOptions;
+3437:          showToast("Failed to retrieve file data for direct share request.", "error");
+3453:        showToast("Decryption failed. Cannot share secure payload.", "error");
+3462:            type: "share_request",
+3473:        console.log("share_request sent with file data attached");
+3887:      showToast(`Downloading unencrypted public share ${file.name}...`, "info");
+3896:      showToast("Failed to download public share.", "error");
+3903:            type: "share_response",
+3914:    // 1. Send share_response via WebSocket
+3917:            type: "share_response",
+3962:        console.error("Auto-vault save from accept share failed", err);
+3963:        showToast(`Failed to store shared file: ${err.message || err}`, "error");
+4014:      // Fetch shared file payload on-demand if not already present
+4145:  const sharedItemsCount = activeFiles.filter(
+4152:  // Retrieve global shared files of other registered peers
+4168:      console.error("Failed to refresh shared files:", err);
+4553:          {shareDialogOptions.open && shareDialogOptions.file && (
+4565:                    title={shareDialogOptions.file.name}
+4567:                    Share "{shareDialogOptions.file.name.substring(0, 20)}
+4568:                    {shareDialogOptions.file.name.length > 20 ? "..." : ""}"
+4573:                  To securely share this file with other users in the local P2P
+4584:                      onClick={() => setShareDropdownOpen(!shareDropdownOpen)}
+4587:                      <span className={`${shareDialogOptions.targetUsername ? "text-white font-semibold" : "text-white/40"}`}>
+4588:                        {shareDialogOptions.targetUsername ? `@${shareDialogOptions.targetUsername}` : "Select a recipient..."}
+4590:                      <ChevronDown className={`w-4 h-4 text-indigo-400 transition-transform duration-200 ${shareDropdownOpen ? 'rotate-180' : ''}`} />
+4592:                    {shareDropdownOpen && (
+4609:                                    ...shareDialogOptions,
+4614:                                className={`w-full text-left px-4 py-2.5 text-xs font-medium hover:bg-indigo-600/30 hover:text-white transition-colors flex items-center justify-between ${shareDialogOptions.targetUsername === peer.username ? 'text-indigo-400 bg-indigo-500/10' : 'text-indigo-200/80'}`}
+4617:                                {shareDialogOptions.targetUsername === peer.username && (
+4634:                    value={shareDialogOptions.note}
+4637:                        ...shareDialogOptions,
+4682:                  <div className={`w-12 h-12 rounded-xl ${publicShareDialog.mode === "share" ? "bg-teal-500/20 text-teal-300" : "bg-indigo-500/20 text-indigo-300"} flex items-center justify-center`}>
+4687:                      {publicShareDialog.mode === "share" ? "Make Public" : "Make Private"}
+4690:                      {publicShareDialog.mode === "share" ? "Pool entry requires removing encryption" : "Securing file into private vault"}
+4696:                  {publicShareDialog.mode === "share" ? 
+4697:                    (<>You are about to share <strong className="text-white">{publicShareDialog.file.name}</strong> to the local mesh pool unconditionally.
+4723:                          onClick={() => setPublicShareDialog({ file: null, open: false, passwordInput: "", mode: "share", isProcessing: false, progress: 0 })}
+4731:                          className={`px-4 py-2 ${publicShareDialog.mode === "share" ? "bg-teal-600 hover:bg-teal-500" : "bg-indigo-600 hover:bg-indigo-500"} rounded-xl text-xs font-black uppercase tracking-wider text-white transition-colors disabled:opacity-50 shadow-md`}
+4733:                          {publicShareDialog.mode === "share" ? "Decrypt & Share" : "Encrypt & Secure"}
+4741:                          className={`h-full rounded-full ${publicShareDialog.mode === "share" ? "bg-teal-500 shadow-[0_0_20px_rgba(20,184,166,0.6)]" : "bg-indigo-500 shadow-[0_0_20px_rgba(99,102,241,0.6)]"}`}
+4751:                             {publicShareDialog.mode === "share" ? "Decrypting file to local shared pool" : "Encrypting file... Removing from local shared pool"}
+5373:                                            showToast("Privacy Lock: Synced peer files cannot be reshared.", "error");
+5380:                                            ? "Privacy Lock: Synced files cannot be shared"
+5406:                                          setShareDialogOptions({ file: item, open: true, note: item.shareNote || "", targetUsername: "" });
+5571:                    Files currently shared to the public mesh pool by you and other vault owners.
+5578:                        No shared files are currently distributed in this
+5579:                        device's workspace pool. Tag shared credentials on

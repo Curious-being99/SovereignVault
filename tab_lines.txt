@@ -1,0 +1,5 @@
+519:  const [mobileActiveTab, setMobileActiveTab] = useState<"files" | "mesh">("files");
+4889:                <div className={`${mobileActiveTab === "files" ? "flex" : "hidden"} lg:flex col-span-1 lg:col-span-8 flex-col min-h-0`}>
+5544:              <div className={`${mobileActiveTab === "mesh" ? "block" : "hidden"} lg:block col-span-1 lg:col-span-4 space-y-6 overflow-y-auto custom-scrollbar pr-1 pb-36 lg:pb-10`}>
+6253:                const isFilesTabActive = mobileActiveTab === "files" && currentPath !== "/Trash" && selectedCategory === "all" && !showDevicePairing;
+6256:                const isSharedTabActive = mobileActiveTab === "mesh" && !showDevicePairing;

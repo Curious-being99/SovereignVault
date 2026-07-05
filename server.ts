@@ -4,6 +4,7 @@ import { createServer as createViteServer } from "vite";
 import Database from "better-sqlite3";
 import fs from "fs";
 import { createServer } from "http";
+import { Server } from "socket.io";
 import { WebSocketServer } from "ws";
 import os from "os";
 import crypto from "crypto";
@@ -219,13 +220,30 @@ function getUserEncryptionKey(userIdOrSeedId?: number | string | null): Buffer {
   if (!userIdOrSeedId) return encryptionKey;
 
   let seedId: string | null = null;
+  let migrationKeyHex: string | null = null;
+
   if (typeof userIdOrSeedId === "number") {
     const user = db
-      .prepare("SELECT vaultSeedId FROM users WHERE id = ?")
-      .get(userIdOrSeedId) as { vaultSeedId: string | null } | undefined;
+      .prepare("SELECT vaultSeedId, migrationUserKey FROM users WHERE id = ?")
+      .get(userIdOrSeedId) as { vaultSeedId: string | null; migrationUserKey: string | null } | undefined;
     seedId = user?.vaultSeedId || null;
+    migrationKeyHex = user?.migrationUserKey || null;
   } else {
     seedId = userIdOrSeedId;
+  }
+
+  // If a migration key exists, it's a wrapped key that was derived from a previous system master key.
+  // We prioritize this key to ensure files from the migrated environment remain accessible.
+  if (migrationKeyHex) {
+    try {
+      const wrapped = Buffer.from(migrationKeyHex, "hex");
+      return decryptBuffer(wrapped, encryptionKey);
+    } catch (e) {
+      console.error(
+        "[getUserEncryptionKey] Failed to unwrap migrationUserKey:",
+        e.message,
+      );
+    }
   }
 
   // Fallback to global key for legacy accounts or shared public data without a stable seed
@@ -469,11 +487,12 @@ class ShortBloomFilter {
 }
 
 function buildMerkleRoot(chunks: Buffer[]): string {
+  const algorithm = "sha512";
   if (chunks.length === 0) {
-    return crypto.createHash("sha256").update(Buffer.alloc(0)).digest("hex");
+    return crypto.createHash(algorithm).update(Buffer.alloc(0)).digest("hex");
   }
   let currentLayer = chunks.map((chunk) =>
-    crypto.createHash("sha256").update(chunk).digest("hex"),
+    crypto.createHash(algorithm).update(chunk).digest("hex"),
   );
   while (currentLayer.length > 1) {
     const nextLayer: string[] = [];
@@ -481,14 +500,14 @@ function buildMerkleRoot(chunks: Buffer[]): string {
       if (i + 1 < currentLayer.length) {
         nextLayer.push(
           crypto
-            .createHash("sha256")
+            .createHash(algorithm)
             .update(currentLayer[i] + currentLayer[i + 1])
             .digest("hex"),
         );
       } else {
         nextLayer.push(
           crypto
-            .createHash("sha256")
+            .createHash(algorithm)
             .update(currentLayer[i] + currentLayer[i])
             .digest("hex"),
         );
@@ -500,8 +519,9 @@ function buildMerkleRoot(chunks: Buffer[]): string {
 }
 
 function computeMerkleRoot(data?: Buffer | string | null): string {
+  const algorithm = "sha512";
   if (!data) {
-    return crypto.createHash("sha256").update(Buffer.alloc(0)).digest("hex");
+    return crypto.createHash(algorithm).update(Buffer.alloc(0)).digest("hex");
   }
   let buffer: Buffer;
   if (Buffer.isBuffer(data)) {
@@ -1614,12 +1634,14 @@ function runMigrations() {
       passwordSalt TEXT NOT NULL,
       joinedAt INTEGER NOT NULL,
       avatarColor TEXT,
-      autoLockInterval INTEGER DEFAULT 0
+      autoLockInterval INTEGER DEFAULT 0,
+      privateVaultId TEXT UNIQUE
     );
 
     CREATE TABLE IF NOT EXISTS files (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       userId INTEGER NOT NULL,
+      privateVaultId TEXT,
       name TEXT NOT NULL,
       data BLOB,
       type TEXT NOT NULL,
@@ -1632,6 +1654,14 @@ function runMigrations() {
       lastModified INTEGER NOT NULL,
       sigAlgorithm TEXT DEFAULT 'HMAC-SHA256',
       merkleRoot TEXT DEFAULT NULL,
+      deletedAt INTEGER,
+      originalFolderPath TEXT,
+      clientEncrypted INTEGER DEFAULT 1,
+      dagHash TEXT,
+      previousDagHash TEXT,
+      dagSignature TEXT,
+      vaultSeedId TEXT,
+      encryptionKey TEXT,
       FOREIGN KEY(userId) REFERENCES users(id)
     );
 
@@ -1674,6 +1704,9 @@ function runMigrations() {
     "ALTER TABLE mesh_shadow_blocks ADD COLUMN cryptoBlockNumber INTEGER DEFAULT 0",
     "ALTER TABLE mesh_shadow_blocks ADD COLUMN originalOwnerSeedId TEXT DEFAULT NULL",
     "ALTER TABLE mesh_shadow_blocks ADD COLUMN peerReceiverSeedId TEXT DEFAULT NULL",
+    "ALTER TABLE users ADD COLUMN migrationUserKey TEXT DEFAULT NULL",
+    "ALTER TABLE users ADD COLUMN privateVaultId TEXT DEFAULT NULL",
+    "ALTER TABLE files ADD COLUMN privateVaultId TEXT DEFAULT NULL",
   ];
 
   for (const m of migrations) {
@@ -2022,6 +2055,22 @@ function runStorageGarbageCollector() {
     console.log(
       `[StorageGC] Completed. Freed: ${(totalBytesFreed / (1024 * 1024)).toFixed(2)} MB. Purged orphans: ${deletedOrphanFilesCount} files, ${deletedOrphanChunksCount} chunks.`,
     );
+
+    // 4. Automated Trash Cleanup: Purge files deleted more than 30 days ago
+    const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+    const cutoffDate = Date.now() - THIRTY_DAYS_MS;
+    
+    const trashFiles = db.prepare("SELECT id, name, merkleRoot FROM files WHERE deletedAt IS NOT NULL AND deletedAt < ?").all(cutoffDate) as { id: number, name: string, merkleRoot: string | null }[];
+    
+    if (trashFiles.length > 0) {
+      console.log(`[StorageGC] Auto-purging ${trashFiles.length} files from trash (older than 30 days)...`);
+      for (const f of trashFiles) {
+        db.prepare("DELETE FROM files WHERE id = ?").run(f.id);
+        safeDeletePhysicalFile(f.id, f.merkleRoot);
+        deletedTrashFilesCount++;
+      }
+      console.log(`[StorageGC] Trash cleanup complete. Purged: ${deletedTrashFilesCount} files.`);
+    }
   } catch (e) {
     console.error("[StorageGC] Error during storage garbage collection:", e);
   }
@@ -2514,6 +2563,11 @@ function rebuildUserDag(userId: number) {
 
 async function startServer() {
   const app = express();
+  app.use((req, res, next) => {
+    res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+    res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
+    next();
+  });
   const PORT = 3000;
 
   // Use high-performance compression for metadata lists and non-binary responses
@@ -2892,7 +2946,8 @@ async function startServer() {
       ? previousBlock.dagHash
       : "GENESIS_BLOCK_000000000000000000000000000000";
 
-    const payloadToHash = `${expectedPrevHash}::${finalName}::${size}::${type}::${lastModified || Date.now()}::${mRoot}`;
+    const finalLastModified = lastModified || Date.now();
+    const payloadToHash = `${expectedPrevHash}::${finalName}::${size}::${type}::${finalLastModified}::${mRoot}`;
     const computedDagHash = crypto
       .createHash("sha256")
       .update(payloadToHash)
@@ -2925,7 +2980,7 @@ async function startServer() {
           0, // isShared
           null, // senderName
           null, // shareNote
-          lastModified || Date.now(),
+          finalLastModified,
           clientEncrypted ? 1 : 0,
           expectedPrevHash,
           computedDagHash,
@@ -4243,9 +4298,12 @@ async function startServer() {
     }
 
     try {
+      const user = db.prepare("SELECT vaultSeedId FROM users WHERE id = ?").get(userId) as { vaultSeedId: string | null } | undefined;
+      const seedId = user?.vaultSeedId || null;
+
       const shadowBlocks = db
-        .prepare("SELECT * FROM mesh_shadow_blocks WHERE ownerId = ?")
-        .all(userId) as any[];
+        .prepare("SELECT * FROM mesh_shadow_blocks WHERE ownerId = ? OR vaultSeedId = ? OR originalOwnerSeedId = ?")
+        .all(userId, seedId, seedId) as any[];
       const validBlocks = [];
       for (const b of shadowBlocks) {
         try {
@@ -5130,12 +5188,15 @@ async function startServer() {
 
       const mRoot = file.merkleRoot || "GENESIS_MERKLE_ROOT_000000000000000000";
       const payloadToHash = `${expectedPrevHash}::${file.name}::${file.size}::${file.type}::${file.lastModified}::${mRoot}`;
+      
+      const algorithm = 'sha256';
+      
       const computedDagHash = crypto
-        .createHash("sha256")
+        .createHash(algorithm)
         .update(payloadToHash)
         .digest("hex");
       const computedDagSignature = crypto
-        .createHmac("sha256", VAULT_MASTER_KEY)
+        .createHmac(algorithm, VAULT_MASTER_KEY)
         .update(computedDagHash)
         .digest("hex");
 
@@ -5348,7 +5409,7 @@ async function startServer() {
 
   app.post("/api/vault/import-pack", (req, res) => {
     console.log(`[VaultImport] Commencing identity restoration...`);
-    const { version, profile, files } = req.body;
+    const { version, profile, files, systemMasterKey } = req.body;
     if (
       !profile ||
       !profile.username ||
@@ -5375,6 +5436,9 @@ async function startServer() {
             .update(profile.username.toLowerCase())
             .digest("hex");
 
+        const privateVaultId = profile.privateVaultId || 
+                               crypto.createHash("sha256").update(derivedSeedId + "vault-id-isolation-constant").digest("hex").substring(0, 32);
+
         if (existingUser) {
           // If the profile already exists, do a password validation match check to avoid state hijacking
           if (existingUser.passwordHash !== profile.passwordHash) {
@@ -5387,7 +5451,7 @@ async function startServer() {
           db.prepare(
             `
             UPDATE users 
-            SET displayName = ?, passwordHash = ?, passwordSalt = ?, avatarColor = ?, autoLockInterval = ?, vaultSeedId = ?
+            SET displayName = ?, passwordHash = ?, passwordSalt = ?, avatarColor = ?, autoLockInterval = ?, vaultSeedId = ?, privateVaultId = ?
             WHERE id = ?
           `,
           ).run(
@@ -5399,6 +5463,7 @@ async function startServer() {
               ? profile.autoLockInterval
               : existingUser.autoLockInterval,
             profile.vaultSeedId || derivedSeedId,
+            privateVaultId,
             userId,
           );
         } else {
@@ -5413,8 +5478,8 @@ async function startServer() {
               result = db
                 .prepare(
                   `
-                INSERT INTO users (id, username, displayName, passwordHash, passwordSalt, joinedAt, avatarColor, autoLockInterval, vaultSeedId)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO users (id, username, displayName, passwordHash, passwordSalt, joinedAt, avatarColor, autoLockInterval, vaultSeedId, privateVaultId)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               `,
                 )
                 .run(
@@ -5427,6 +5492,7 @@ async function startServer() {
                   profile.avatarColor || "#6366f1",
                   profile.autoLockInterval || 0,
                   profile.vaultSeedId || derivedSeedId,
+                  privateVaultId,
                 );
             }
           }
@@ -5435,8 +5501,8 @@ async function startServer() {
             result = db
               .prepare(
                 `
-              INSERT INTO users (username, displayName, passwordHash, passwordSalt, joinedAt, avatarColor, autoLockInterval, vaultSeedId)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              INSERT INTO users (username, displayName, passwordHash, passwordSalt, joinedAt, avatarColor, autoLockInterval, vaultSeedId, privateVaultId)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             `,
               )
               .run(
@@ -5448,9 +5514,37 @@ async function startServer() {
                 profile.avatarColor || "#6366f1",
                 profile.autoLockInterval || 0,
                 profile.vaultSeedId || derivedSeedId,
+                privateVaultId,
               );
           }
           userId = Number(result.lastInsertRowid);
+        }
+
+        // Handle System Migration Key: If provided, derive the old encryption key and store it for this user.
+        // This ensures that files copied from a server with a different VAULT_DB_KEY remain decryptable.
+        if (systemMasterKey && systemMasterKey !== VAULT_MASTER_KEY) {
+          const oldSystemKey = crypto
+            .createHash("sha256")
+            .update(systemMasterKey)
+            .digest();
+          const seedIdToUse = profile.vaultSeedId || derivedSeedId;
+          const oldUserKey = crypto
+            .createHmac("sha256", oldSystemKey)
+            .update(seedIdToUse)
+            .digest();
+
+          // Securely wrap the old user key with the current system's master encryption key
+          const wrappedKey = encryptBuffer(oldUserKey, encryptionKey).toString(
+            "hex",
+          );
+
+          db.prepare("UPDATE users SET migrationUserKey = ? WHERE id = ?").run(
+            wrappedKey,
+            userId,
+          );
+          console.log(
+            `[VaultImport] Stored wrapped migrationUserKey for user ${userId} to support server-level decryption migration.`,
+          );
         }
 
         // Pre-fetch all files for the user currently on the server to prevent destructive duplicate uploads or deletions.
@@ -5467,8 +5561,8 @@ async function startServer() {
         if (Array.isArray(files)) {
           const userVaultSeedId = getVaultSeedIdForUser(userId);
           const insertFileStmt = db.prepare(`
-            INSERT INTO files (userId, name, data, type, size, folderPath, isFolder, isShared, senderName, shareNote, lastModified, deletedAt, originalFolderPath, previousDagHash, dagHash, dagSignature, merkleRoot, vaultSeedId, clientEncrypted, encryptionKey)
-            VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO files (userId, name, data, type, size, folderPath, isFolder, isShared, senderName, shareNote, lastModified, deletedAt, originalFolderPath, previousDagHash, dagHash, dagSignature, merkleRoot, vaultSeedId, clientEncrypted, encryptionKey, privateVaultId)
+            VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `);
 
           for (const f of files) {
@@ -5539,7 +5633,7 @@ async function startServer() {
                 db.prepare(
                   `
                   UPDATE files 
-                  SET type = ?, size = ?, isFolder = ?, isShared = ?, senderName = ?, shareNote = ?, lastModified = ?, deletedAt = ?, originalFolderPath = ?, previousDagHash = ?, dagHash = ?, dagSignature = ?, merkleRoot = ?, vaultSeedId = ?, clientEncrypted = ?, encryptionKey = ?
+                  SET type = ?, size = ?, isFolder = ?, isShared = ?, senderName = ?, shareNote = ?, lastModified = ?, deletedAt = ?, originalFolderPath = ?, previousDagHash = ?, dagHash = ?, dagSignature = ?, merkleRoot = ?, vaultSeedId = ?, clientEncrypted = ?, encryptionKey = ?, privateVaultId = ?
                   WHERE id = ?
                 `,
                 ).run(
@@ -5559,6 +5653,7 @@ async function startServer() {
                   resolvedSeedId,
                   clientEncryptedVal,
                   f.encryptionKey || null,
+                  privateVaultId,
                   existingFile.id,
                 );
               }
@@ -5584,6 +5679,7 @@ async function startServer() {
                 resolvedSeedId,
                 clientEncryptedVal,
                 f.encryptionKey || null,
+                privateVaultId,
               );
 
               const insertedId = Number(info.lastInsertRowid);
@@ -5740,6 +5836,7 @@ async function startServer() {
       const users = db
         .prepare("SELECT id, username, displayName, joinedAt FROM users")
         .all();
+      console.log(`[Auth] Serving metadata for ${users.length} workspace users.`);
       res.json(users);
     } catch (e) {
       console.error("Error fetching users:", e);
@@ -5755,6 +5852,7 @@ async function startServer() {
       passwordSalt,
       joinedAt,
       autoLockInterval,
+      privateVaultId,
     } = req.body;
     if (!username || typeof username !== "string") {
       return res.status(400).json({ error: "Username is required" });
@@ -5778,8 +5876,11 @@ async function startServer() {
         .createHmac("sha256", passwordHash)
         .update(username.toLowerCase())
         .digest("hex");
+      const computedPrivateVaultId = privateVaultId || 
+                                     crypto.createHash("sha256").update(derivedSeedId + "vault-id-isolation-constant").digest("hex").substring(0, 32);
+
       const stmt = db.prepare(
-        "INSERT INTO users (username, displayName, passwordHash, passwordSalt, joinedAt, avatarColor, autoLockInterval, vaultSeedId) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO users (username, displayName, passwordHash, passwordSalt, joinedAt, avatarColor, autoLockInterval, vaultSeedId, privateVaultId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       );
       const info = stmt.run(
         username,
@@ -5790,6 +5891,7 @@ async function startServer() {
         deterministicColor,
         autoLockInterval || 0,
         derivedSeedId,
+        computedPrivateVaultId,
       );
 
       res.json({ id: info.lastInsertRowid, vaultSeedId: derivedSeedId });
@@ -5828,8 +5930,15 @@ async function startServer() {
           .createHmac("sha256", passwordHash)
           .update(username.toLowerCase())
           .digest("hex");
+
+        const privateVaultId = crypto
+          .createHash("sha256")
+          .update(derivedSeedId + "vault-id-isolation-constant")
+          .digest("hex")
+          .substring(0, 32);
+
         const stmt = db.prepare(
-          "INSERT INTO users (username, displayName, passwordHash, passwordSalt, joinedAt, avatarColor, autoLockInterval, vaultSeedId) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO users (username, displayName, passwordHash, passwordSalt, joinedAt, avatarColor, autoLockInterval, vaultSeedId, privateVaultId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         const colors = [
           "#6366f1",
@@ -5852,6 +5961,7 @@ async function startServer() {
           deterministicColor,
           0,
           derivedSeedId,
+          privateVaultId,
         );
 
         user = db
@@ -6756,6 +6866,7 @@ async function startServer() {
       shareNote,
       lastModified,
       clientEncrypted,
+      privateVaultId,
     } = req.body;
     const headerUserId = Number(req.header("X-User-Id"));
     if (!headerUserId || headerUserId !== Number(userId)) {
@@ -6824,8 +6935,8 @@ async function startServer() {
       const userVaultSeedId = getVaultSeedIdForUser(argUserId);
 
       const stmt = db.prepare(`
-        INSERT INTO files (userId, name, data, type, size, folderPath, isFolder, isShared, senderName, shareNote, lastModified, previousDagHash, dagHash, dagSignature, merkleRoot, vaultSeedId, clientEncrypted) 
-        VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO files (userId, name, data, type, size, folderPath, isFolder, isShared, senderName, shareNote, lastModified, previousDagHash, dagHash, dagSignature, merkleRoot, vaultSeedId, clientEncrypted, privateVaultId) 
+        VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const info = stmt.run(
         argUserId,
@@ -6844,6 +6955,7 @@ async function startServer() {
         dagMetadata.merkleRoot,
         userVaultSeedId,
         argClientEncrypted ? 1 : 0,
+        privateVaultId || null,
       );
 
       const insertedId = Number(info.lastInsertRowid);
@@ -6875,6 +6987,7 @@ async function startServer() {
         lastModified: argLastModified,
         ownerHint: getCurrentUserUsername(argUserId),
         vaultSeedId: userVaultSeedId,
+        privateVaultId: privateVaultId,
       };
       if (req.body.originalId) metaData.originalId = req.body.originalId;
       fs.writeFileSync(metaPath, JSON.stringify(metaData));
@@ -7274,6 +7387,12 @@ async function startServer() {
   }
 
   const httpServer = createServer(app);
+  const io = new Server(httpServer);
+  io.on("connection", (socket) => {
+    socket.on("offer", (data) => socket.broadcast.emit("offer", data));
+    socket.on("answer", (data) => socket.broadcast.emit("answer", data));
+    socket.on("candidate", (data) => socket.broadcast.emit("candidate", data));
+  });
   httpServer.setTimeout(600000); // 10 minutes timeout for large file operations
   httpServer.keepAliveTimeout = 65000;
   httpServer.headersTimeout = 66000;

@@ -1,7 +1,11 @@
 {
-  "name": "Sovereign Vault",
-  "description": "An offline-first, encrypted, and real-time synchronized file storage application.",
-  "requestFramePermissions": ["camera"],
+  "name": "Sovereign Recovery Hub",
+  "description": "A secure, offline-first decentralized recovery console for E2E encrypted vaults.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]

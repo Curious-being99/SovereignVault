@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Shield, CheckCircle2, Zap, Link as LinkIcon, Database, Terminal, Cpu, Globe, AlertTriangle, RefreshCw } from 'lucide-react';
-import { api } from '../lib/api';
+import { api } from "../lib/api";
+import { ShardedFileMatrix } from "./ShardedFileMatrix";
 
 interface DagBlock {
   id: number;
@@ -256,9 +257,35 @@ export const DagVerificationModal: React.FC<DagVerificationModalProps> = ({ bloc
                   </motion.div>
                 )}
                 {error && (
-                  <div className="flex items-center gap-2 text-red-400 font-bold animate-pulse">
-                     <AlertTriangle className="w-3 h-3" />
-                     <span>[FAIL] Audit unsuccessful: Chain integrity error detected.</span>
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2 text-red-400 font-bold animate-pulse">
+                       <AlertTriangle className="w-3 h-3" />
+                       <span>[FAIL] Audit unsuccessful: Chain integrity error detected.</span>
+                    </div>
+                    <div className="flex gap-2">
+                      <button 
+                        onClick={async () => {
+                          try {
+                             await api.repairStorage(userId);
+                             onClose();
+                          } catch (e) { console.error(e); }
+                        }}
+                        className="text-[10px] bg-red-900/30 hover:bg-red-900/50 text-red-200 px-2 py-1 rounded border border-red-800"
+                      >
+                        Repair Storage
+                      </button>
+                      <button 
+                        onClick={async () => {
+                          try {
+                             await api.rebuildVaultDag(userId);
+                             onClose();
+                          } catch (e) { console.error(e); }
+                        }}
+                        className="text-[10px] bg-red-900/30 hover:bg-red-900/50 text-red-200 px-2 py-1 rounded border border-red-800"
+                      >
+                        Rebuild DAG
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -266,6 +293,9 @@ export const DagVerificationModal: React.FC<DagVerificationModalProps> = ({ bloc
           </div>
 
             {/* Footer stats */}
+            <div className="p-4 sm:px-8 border-t border-white/5">
+              <ShardedFileMatrix fileName={block.name} fileSize={block.size} dagHash={block.dagHash} />
+            </div>
             <div className="bg-white/[0.02] border-t border-white/5 p-4 py-3 grid grid-cols-2 sm:grid-cols-4 gap-2 flex-shrink-0">
               <div className="text-center p-2 rounded bg-white/5 border border-white/5">
                 <div className="text-[9px] text-white/40 uppercase font-black tracking-widest">Confirmations</div>
