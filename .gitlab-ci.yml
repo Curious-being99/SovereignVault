@@ -6,7 +6,10 @@ stages:
 
 before_script:
   - apt-get update
-  - apt-get install -y python3 make g++ openjdk-17-jdk
+  - apt-get install -y python3 make g++ openjdk-17-jdk curl
+  - mkdir -p android/gradle/wrapper
+  - curl -L https://raw.githubusercontent.com/gradle/gradle/v8.14.3/gradle/wrapper/gradle-wrapper.jar -o android/gradle/wrapper/gradle-wrapper.jar
+
 
 test_job:
   stage: test
