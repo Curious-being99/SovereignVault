@@ -5,8 +5,8 @@ stages:
   - build
 
 before_script:
-  - apt-get update && apt-get install -y python3 make g++ wget
-  - wget https://raw.githubusercontent.com/gradle/gradle/v8.14.3/gradle/wrapper/gradle-wrapper.jar -O android/gradle/wrapper/gradle-wrapper.jar
+  - apt-get update
+  - apt-get install -y python3 make g++ openjdk-17-jdk
 
 test_job:
   stage: test
@@ -16,7 +16,7 @@ test_job:
 build_android:
   stage: build
   script:
-    - npm install
+    - npm ci
     - npm run build
     - npx cap sync android
     - cd android
