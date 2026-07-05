@@ -1,8 +1,11 @@
-image: reactnativecommunity/react-native-android:latest
+image: node:22
 
 stages:
   - test
   - build
+
+before_script:
+  - apt-get update && apt-get install -y python3 make g++
 
 test_job:
   stage: test
