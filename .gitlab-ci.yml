@@ -1,7 +1,13 @@
 image: reactnativecommunity/react-native-android:latest
 
 stages:
+  - test
   - build
+
+test_job:
+  stage: test
+  script:
+    - echo "Skipping tests"
 
 build_android:
   stage: build
@@ -12,7 +18,6 @@ build_android:
     - cd android
     - chmod +x gradlew
     - ./gradlew assembleDebug
-    - mv app/build/outputs/apk/debug/app-debug.apk ../app-sovereignvault.apk
   artifacts:
     paths:
-      - app-sovereignvault.apk
+      - android/app/build/outputs/apk/debug/app-debug.apk
