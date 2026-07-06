@@ -195,7 +195,7 @@ class WrappedDatabase extends OriginalDatabase {
   }
 }
 // Initialize SQLite database
-const dbPath = path.join(process.cwd(), "vault.db");
+const dbPath = process.env.DATABASE_PATH || path.join(process.cwd(), "vault.db");
 let db = new WrappedDatabase(dbPath);
 
 // Tune database settings for infinite scale & concurrent execution safety
@@ -2568,7 +2568,7 @@ async function startServer() {
     res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
     next();
   });
-  const PORT = 3000;
+  const PORT = parseInt(process.env.PORT || "3000", 10);
 
   // Use high-performance compression for metadata lists and non-binary responses
   app.use(
@@ -4435,7 +4435,7 @@ async function startServer() {
               "SQLite backup API failed, falling back to fs copy:",
               backupErr,
             );
-            fs.copyFileSync("vault.db", tempPath);
+            fs.copyFileSync(dbPath, tempPath);
             res.download(tempPath, "quantum_secure_vault.db", (err) => {
               try {
                 fs.unlinkSync(tempPath);
@@ -4443,7 +4443,7 @@ async function startServer() {
             });
           });
       } else {
-        fs.copyFileSync("vault.db", tempPath);
+        fs.copyFileSync(dbPath, tempPath);
         res.download(tempPath, "quantum_secure_vault.db", (err) => {
           try {
             fs.unlinkSync(tempPath);
