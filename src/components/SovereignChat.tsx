@@ -37,14 +37,20 @@ export const SovereignChat: React.FC<SovereignChatProps> = ({ onClose, userSeedI
   const [peerConnection, setPeerConnection] = useState<RTCPeerConnection | null>(null);
   const [dataChannel, setDataChannel] = useState<RTCDataChannel | null>(null);
   
+  const socketRef = useRef<Socket | null>(null);
+  const pcRef = useRef<RTCPeerConnection | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const newSocket = io({ transports: ["websocket"] });
+    const socketUrl = typeof window !== 'undefined' ? window.location.origin : '';
+    const newSocket = io(socketUrl, { transports: ["websocket"] });
     setSocket(newSocket);
+    socketRef.current = newSocket;
     
     newSocket.on("connect", () => {
       console.log("Socket connected:", newSocket.id);
+      // Automatically announce presence so any waiting peer can initiate
+      newSocket.emit("ready");
     });
     
     newSocket.on("connect_error", (err) => {
@@ -52,7 +58,33 @@ export const SovereignChat: React.FC<SovereignChatProps> = ({ onClose, userSeedI
     });
 
     const pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun.services.mozilla.com' }
+      ]
+    });
+    setPeerConnection(pc);
+    pcRef.current = pc;
+
+    const doInitiateConnection = async () => {
+      try {
+        console.log("Auto-initiating WebRTC PeerConnection...");
+        const channel = pc.createDataChannel("chat");
+        setupDataChannel(channel);
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        newSocket.emit("offer", offer);
+      } catch (err) {
+        console.error("Failed to auto-initiate connection:", err);
+      }
+    };
+
+    // When we hear that another peer is "ready", automatically connect to them!
+    newSocket.on("ready", () => {
+      console.log("Peer ready event received, initiating handshake...");
+      doInitiateConnection();
     });
 
     pc.onicecandidate = (event) => {
@@ -65,7 +97,6 @@ export const SovereignChat: React.FC<SovereignChatProps> = ({ onClose, userSeedI
       setupDataChannel(event.channel);
     };
 
-    setPeerConnection(pc);
     const iceCandidateQueue: RTCIceCandidate[] = [];
 
     newSocket.on("offer", async (offer) => {
@@ -95,7 +126,15 @@ export const SovereignChat: React.FC<SovereignChatProps> = ({ onClose, userSeedI
       console.log("ICE Connection State:", pc.iceConnectionState);
     };
 
+    // Auto-initiate connection after 1.5 seconds just in case the other peer is already there and we missed their ready signal
+    const timer = setTimeout(() => {
+      if (newSocket.connected && pc.iceConnectionState !== 'connected' && pc.iceConnectionState !== 'completed') {
+        doInitiateConnection();
+      }
+    }, 1500);
+
     return () => {
+      clearTimeout(timer);
       newSocket.disconnect();
       pc.close();
     };
@@ -118,12 +157,18 @@ export const SovereignChat: React.FC<SovereignChatProps> = ({ onClose, userSeedI
   };
 
   const initiateConnection = async () => {
-    if (!peerConnection) return;
-    const channel = peerConnection.createDataChannel("chat");
-    setupDataChannel(channel);
-    const offer = await peerConnection.createOffer();
-    await peerConnection.setLocalDescription(offer);
-    socket?.emit("offer", offer);
+    const pc = pcRef.current;
+    const socket = socketRef.current;
+    if (!pc || !socket) return;
+    try {
+      const channel = pc.createDataChannel("chat");
+      setupDataChannel(channel);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socket.emit("offer", offer);
+    } catch (err) {
+      console.error("Failed to initiate manual connection:", err);
+    }
   };
 
   const handleSendMessage = async (e?: React.FormEvent) => {

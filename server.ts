@@ -7390,6 +7390,10 @@ async function startServer() {
   const io = new Server(httpServer);
   io.on("connection", (socket) => {
     console.log("Socket.io connected:", socket.id);
+    socket.on("ready", (data) => {
+      console.log("Socket.io relaying ready signal from", socket.id);
+      socket.broadcast.emit("ready", data);
+    });
     socket.on("offer", (data) => {
       console.log("Socket.io relaying offer from", socket.id);
       socket.broadcast.emit("offer", data);

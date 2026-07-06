@@ -51,7 +51,7 @@ export function DecentralizedSyncConsole({
   // Interactive UI states
   const [connectingKaspa, setConnectingKaspa] = useState(false);
   const [connectingOneDB, setConnectingOneDB] = useState(false);
-  const [onedbProvider, setOnedbProvider] = useState<'google_drive' | 'dropbox' | 'github'>('github');
+  const [onedbProvider, setOnedbProvider] = useState<'github'>('github');
   const [onedbInstanceUrl, setOnedbInstanceUrl] = useState('https://api.github.com');
   
   // Real credentials state
@@ -72,6 +72,29 @@ export function DecentralizedSyncConsole({
     return () => window.removeEventListener('decentralized_logs_updated', handleLogsUpdate);
   }, []);
 
+  const [manualKaspaAddress, setManualKaspaAddress] = useState(() => {
+    return decentralizedSync.getKaspaSession().kaspaAddress || '';
+  });
+
+  // Automatically connect to Kaspa BlockDAG on component mount or user change only if an address was already stored/saved!
+  useEffect(() => {
+    const saved = decentralizedSync.getKaspaSession();
+    if (saved && saved.kaspaAddress) {
+      const autoConnectKaspa = async () => {
+        setConnectingKaspa(true);
+        try {
+          const session = await decentralizedSync.connectKaspaNode(currentUser?.id, saved.kaspaAddress);
+          setKaspaSession(session);
+        } catch (e) {
+          console.warn("Kaspa auto-connection failed on load:", e);
+        } finally {
+          setConnectingKaspa(false);
+        }
+      };
+      autoConnectKaspa();
+    }
+  }, [currentUser]);
+
   // Update sessions
   const refreshSessions = () => {
     setKaspaSession(decentralizedSync.getKaspaSession());
@@ -79,23 +102,36 @@ export function DecentralizedSyncConsole({
     setOnedbSession(sess);
   };
 
-  // Keep endpoint URL aligned with provider choice
-  useEffect(() => {
-    if (onedbProvider === 'github') {
-      setOnedbInstanceUrl('https://api.github.com');
-    } else {
-      setOnedbInstanceUrl('https://onedb.io/api');
-    }
-  }, [onedbProvider]);
-
   const handleConnectKaspa = async () => {
     setConnectingKaspa(true);
     try {
       const session = await decentralizedSync.connectKaspaNode(currentUser?.id);
       setKaspaSession(session);
-      showToast("Kaspa Node Linked! Cryptographic BlockDAG anchoring is active.", "success");
+      setManualKaspaAddress(session.kaspaAddress);
+      showToast("Kaspa Wallet Connected! Cryptographic BlockDAG anchoring is active.", "success");
     } catch (e: any) {
-      showToast(e.message || "Failed to establish Kaspa handshakes.", "error");
+      showToast(e.message || "Failed to connect to Web3 Kasware Wallet.", "error");
+    } finally {
+      setConnectingKaspa(false);
+    }
+  };
+
+  const handleLinkManualAddress = async () => {
+    const trimmed = manualKaspaAddress.trim();
+    if (!trimmed) {
+      showToast("Please enter a valid Kaspa address.", "error");
+      return;
+    }
+    if (!trimmed.startsWith('kaspa:')) {
+      showToast("Kaspa addresses must start with 'kaspa:'.", "warning");
+    }
+    setConnectingKaspa(true);
+    try {
+      const session = await decentralizedSync.connectKaspaNode(currentUser?.id, trimmed);
+      setKaspaSession(session);
+      showToast("Successfully linked your custom on-chain Kaspa address!", "success");
+    } catch (e: any) {
+      showToast(e.message || "Failed to link address", "error");
     } finally {
       setConnectingKaspa(false);
     }
@@ -321,36 +357,63 @@ export function DecentralizedSyncConsole({
                 </div>
               </div>
 
-              {kaspaSession.status === 'disconnected' ? (
+              {kaspaSession.status === 'disconnected' || !kaspaSession.kaspaAddress ? (
                 /* Disconnected State */
-                <div className="flex flex-col items-center justify-center py-10 text-center gap-6">
-                  <div className="w-20 h-20 rounded-full bg-fuchsia-500/5 border border-fuchsia-500/10 flex items-center justify-center text-fuchsia-400">
-                    <Fingerprint className="w-10 h-10" />
+                <div className="flex flex-col items-center justify-center py-6 text-center gap-6">
+                  <div className="w-16 h-16 rounded-full bg-fuchsia-500/5 border border-fuchsia-500/10 flex items-center justify-center text-fuchsia-400">
+                    <Fingerprint className="w-8 h-8" />
                   </div>
                   <div className="flex flex-col gap-1.5 max-w-md">
                     <h4 className="font-bold text-white text-base">Unlinked Ledger Link</h4>
                     <p className="text-xs text-fuchsia-200/50">
-                      Link your cryptographic vault to a decentralized Kaspa peer node to generate 
-                      ledger hashes and establish secure, high-speed chronological state backups.
+                      Link your cryptographic vault to a decentralized Kaspa peer node. Connect your active Kasware Wallet Web3 extension or paste your real on-chain Kaspa address below to enable persistent anchorage.
                     </p>
                   </div>
-                  <button
-                    onClick={handleConnectKaspa}
-                    disabled={connectingKaspa}
-                    className="flex items-center gap-2 px-6 py-3.5 bg-fuchsia-600 hover:bg-fuchsia-500 disabled:bg-fuchsia-600/40 text-white rounded-2xl font-black text-xs tracking-widest uppercase transition-all shadow-xl shadow-fuchsia-600/10"
-                  >
-                    {connectingKaspa ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        Handshaking Peer Nodes...
-                      </>
-                    ) : (
-                      <>
-                        <Key className="w-4 h-4" />
-                        Connect to Kaspa Node
-                      </>
-                    )}
-                  </button>
+
+                  {/* Real Address Setup Options */}
+                  <div className="w-full max-w-md flex flex-col gap-3 p-4 bg-black/35 rounded-2xl border border-white/5">
+                    <div className="flex flex-col text-left gap-1">
+                      <label className="text-[10px] font-black uppercase tracking-wider text-fuchsia-400">Paste On-Chain Kaspa Address</label>
+                      <input
+                        type="text"
+                        placeholder="kaspa:qp..."
+                        value={manualKaspaAddress}
+                        onChange={(e) => setManualKaspaAddress(e.target.value)}
+                        className="w-full px-4 py-3 bg-black/40 border border-white/10 rounded-xl text-xs font-mono text-white placeholder-white/20 focus:outline-none focus:border-fuchsia-500/50 transition-all"
+                      />
+                    </div>
+                    <button
+                      onClick={handleLinkManualAddress}
+                      disabled={connectingKaspa}
+                      className="w-full py-2.5 bg-fuchsia-600/20 hover:bg-fuchsia-600/30 disabled:opacity-50 border border-fuchsia-500/30 text-fuchsia-300 rounded-xl font-bold text-xs uppercase tracking-widest transition-all"
+                    >
+                      {connectingKaspa ? "Linking Address..." : "Link Custom Address"}
+                    </button>
+
+                    <div className="flex items-center my-1">
+                      <div className="flex-grow border-t border-white/5"></div>
+                      <span className="px-3 text-[10px] uppercase font-bold text-white/25 tracking-widest">or</span>
+                      <div className="flex-grow border-t border-white/5"></div>
+                    </div>
+
+                    <button
+                      onClick={handleConnectKaspa}
+                      disabled={connectingKaspa}
+                      className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-fuchsia-600 hover:bg-fuchsia-500 disabled:bg-fuchsia-600/40 text-white rounded-xl font-black text-xs tracking-widest uppercase transition-all shadow-xl shadow-fuchsia-600/10"
+                    >
+                      {connectingKaspa ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          Connecting Kasware...
+                        </>
+                      ) : (
+                        <>
+                          <Key className="w-4 h-4" />
+                          Connect Kasware Wallet
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </div>
               ) : (
                 /* Connected State with Metrics & Controls */
@@ -437,9 +500,9 @@ export function DecentralizedSyncConsole({
                     <button
                       onClick={handleDisconnectKaspa}
                       disabled={syncing}
-                      className="text-red-400/70 hover:text-red-400 font-bold tracking-wider"
+                      className="text-red-400 hover:text-red-300 font-bold tracking-wider uppercase text-xs hover:underline"
                     >
-                      Disconnect Node
+                      Disconnect Address
                     </button>
                   </div>
                 </div>
@@ -457,7 +520,7 @@ export function DecentralizedSyncConsole({
                   </div>
                   <div>
                     <h3 className="text-lg font-black text-white">OneDB Storage Adapter</h3>
-                    <p className="text-xs text-fuchsia-300/50">Bring-Your-Own-Database: Connect Dropbox, Drive, GitHub</p>
+                    <p className="text-xs text-fuchsia-300/50">Bring-Your-Own-Database: Connect Secure GitHub Repository</p>
                   </div>
                 </div>
 
@@ -474,77 +537,41 @@ export function DecentralizedSyncConsole({
               {!onedbSession.connected ? (
                 /* Connection Setup */
                 <div className="flex flex-col gap-5">
-                  <div className="flex flex-col gap-1.5">
-                    <label className="text-[10px] font-black uppercase tracking-wider text-fuchsia-400">Select Storage Provider</label>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                      {(['google_drive', 'dropbox', 'github'] as const).map((prov) => (
-                        <button
-                          key={prov}
-                          type="button"
-                          onClick={() => setOnedbProvider(prov)}
-                          className={`p-3.5 rounded-xl border text-xs font-black capitalize flex flex-col items-center gap-2 transition-all ${
-                            onedbProvider === prov
-                              ? "bg-fuchsia-600/20 border-fuchsia-500 text-white"
-                              : "bg-black/15 border-white/5 text-fuchsia-300/50 hover:text-white hover:bg-white/5"
-                          }`}
-                        >
-                          <Server className="w-4 h-4" />
-                          {prov.replace('_', ' ')}
-                        </button>
-                      ))}
+                  <div className="flex flex-col gap-4 bg-black/20 p-4 rounded-2xl border border-white/5">
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[10px] font-black uppercase tracking-wider text-fuchsia-400">GitHub Personal Access Token (PAT)</label>
+                      <input
+                        type="password"
+                        value={githubToken}
+                        onChange={(e) => setGithubToken(e.target.value)}
+                        placeholder="ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                        className="bg-black/35 border border-white/10 rounded-xl px-4 py-3 text-xs text-white font-mono placeholder:text-fuchsia-300/20 focus:outline-none focus:border-fuchsia-500 transition-all w-full"
+                      />
+                      <p className="text-[10px] text-white/40">Requires "repo" scope. This token remains strictly client-side.</p>
                     </div>
-                  </div>
 
-                  {onedbProvider === 'github' && (
-                    <div className="flex flex-col gap-4 bg-black/20 p-4 rounded-2xl border border-white/5">
-                      <div className="flex flex-col gap-1">
-                        <label className="text-[10px] font-black uppercase tracking-wider text-fuchsia-400">GitHub Personal Access Token (PAT)</label>
-                        <input
-                          type="password"
-                          value={githubToken}
-                          onChange={(e) => setGithubToken(e.target.value)}
-                          placeholder="ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-                          className="bg-black/35 border border-white/10 rounded-xl px-4 py-3 text-xs text-white font-mono placeholder:text-fuchsia-300/20 focus:outline-none focus:border-fuchsia-500 transition-all w-full"
-                        />
-                        <p className="text-[10px] text-white/40">Requires "repo" scope. This token remains strictly client-side.</p>
-                      </div>
-
-                      <div className="flex flex-col gap-1">
-                        <label className="text-[10px] font-black uppercase tracking-wider text-fuchsia-400">GitHub Repository (owner/name)</label>
-                        <input
-                          type="text"
-                          value={githubRepo}
-                          onChange={(e) => setGithubRepo(e.target.value)}
-                          placeholder="e.g. yourusername/sovereign-vault-data"
-                          className="bg-black/35 border border-white/10 rounded-xl px-4 py-3 text-xs text-white font-mono placeholder:text-fuchsia-300/20 focus:outline-none focus:border-fuchsia-500 transition-all w-full"
-                        />
-                      </div>
-
-                      <div className="flex flex-col gap-1">
-                        <label className="text-[10px] font-black uppercase tracking-wider text-fuchsia-400">Backup File Path</label>
-                        <input
-                          type="text"
-                          value={githubPath}
-                          onChange={(e) => setGithubPath(e.target.value)}
-                          placeholder="sovereign_vault_backup.json"
-                          className="bg-black/35 border border-white/10 rounded-xl px-4 py-3 text-xs text-white font-mono placeholder:text-fuchsia-300/20 focus:outline-none focus:border-fuchsia-500 transition-all w-full"
-                        />
-                      </div>
-                    </div>
-                  )}
-
-                  {onedbProvider !== 'github' && (
-                    <div className="flex flex-col gap-2">
-                      <label className="text-[10px] font-black uppercase tracking-wider text-fuchsia-400">OneDB Endpoint Instance URL</label>
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[10px] font-black uppercase tracking-wider text-fuchsia-400">GitHub Repository (owner/name)</label>
                       <input
                         type="text"
-                        value={onedbInstanceUrl}
-                        onChange={(e) => setOnedbInstanceUrl(e.target.value)}
-                        placeholder="e.g. https://onedb.io/api"
-                        className="bg-black/35 border border-white/10 rounded-2xl px-5 py-3.5 text-xs text-white font-mono placeholder:text-fuchsia-300/20 focus:outline-none focus:border-fuchsia-500 transition-all w-full"
+                        value={githubRepo}
+                        onChange={(e) => setGithubRepo(e.target.value)}
+                        placeholder="e.g. yourusername/sovereign-vault-data"
+                        className="bg-black/35 border border-white/10 rounded-xl px-4 py-3 text-xs text-white font-mono placeholder:text-fuchsia-300/20 focus:outline-none focus:border-fuchsia-500 transition-all w-full"
                       />
                     </div>
-                  )}
+
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[10px] font-black uppercase tracking-wider text-fuchsia-400">Backup File Path</label>
+                      <input
+                        type="text"
+                        value={githubPath}
+                        onChange={(e) => setGithubPath(e.target.value)}
+                        placeholder="sovereign_vault_backup.json"
+                        className="bg-black/35 border border-white/10 rounded-xl px-4 py-3 text-xs text-white font-mono placeholder:text-fuchsia-300/20 focus:outline-none focus:border-fuchsia-500 transition-all w-full"
+                      />
+                    </div>
+                  </div>
 
                   <button
                     onClick={handleConnectOneDB}
