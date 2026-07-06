@@ -7389,15 +7389,33 @@ async function startServer() {
   const httpServer = createServer(app);
   const io = new Server(httpServer);
   io.on("connection", (socket) => {
-    socket.on("offer", (data) => socket.broadcast.emit("offer", data));
-    socket.on("answer", (data) => socket.broadcast.emit("answer", data));
+    console.log("Socket.io connected:", socket.id);
+    socket.on("offer", (data) => {
+      console.log("Socket.io relaying offer from", socket.id);
+      socket.broadcast.emit("offer", data);
+    });
+    socket.on("answer", (data) => {
+      console.log("Socket.io relaying answer from", socket.id);
+      socket.broadcast.emit("answer", data);
+    });
     socket.on("candidate", (data) => socket.broadcast.emit("candidate", data));
+    socket.on("disconnect", () => {
+      console.log("Socket.io disconnected:", socket.id);
+    });
   });
   httpServer.setTimeout(600000); // 10 minutes timeout for large file operations
   httpServer.keepAliveTimeout = 65000;
   httpServer.headersTimeout = 66000;
 
-  const wss = new WebSocketServer({ server: httpServer });
+  const wss = new WebSocketServer({ noServer: true });
+  httpServer.on("upgrade", (request, socket, head) => {
+    if (request.url && request.url.startsWith("/socket.io/")) {
+      return;
+    }
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit("connection", ws, request);
+    });
+  });
 
   interface ActiveClient {
     ws: any;
@@ -7532,9 +7550,20 @@ async function startServer() {
     }
   });
 
-  httpServer.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
+  const startListen = (port: number) => {
+    httpServer.listen(port, "0.0.0.0", () => {
+      console.log(`Server running on http://localhost:${port}`);
+    }).on('error', (err: any) => {
+      if (err.code === 'EADDRINUSE') {
+        console.log(`Port ${port} is busy, retrying...`);
+        setTimeout(() => startListen(port), 1000);
+      } else {
+        console.error(err);
+      }
+    });
+  };
+
+  startListen(PORT);
 
   const gracefulShutdown = () => {
     console.log("Shutting down gracefully...");

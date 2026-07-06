@@ -40,8 +40,16 @@ export const SovereignChat: React.FC<SovereignChatProps> = ({ onClose, userSeedI
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const newSocket = io();
+    const newSocket = io({ transports: ["websocket"] });
     setSocket(newSocket);
+    
+    newSocket.on("connect", () => {
+      console.log("Socket connected:", newSocket.id);
+    });
+    
+    newSocket.on("connect_error", (err) => {
+      console.error("Socket connection error:", err);
+    });
 
     const pc = new RTCPeerConnection({
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
@@ -58,19 +66,23 @@ export const SovereignChat: React.FC<SovereignChatProps> = ({ onClose, userSeedI
     };
 
     setPeerConnection(pc);
+    const iceCandidateQueue: RTCIceCandidate[] = [];
 
     newSocket.on("offer", async (offer) => {
       await pc.setRemoteDescription(offer);
+      iceCandidateQueue.forEach(c => pc.addIceCandidate(c));
+      iceCandidateQueue.length = 0;
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       newSocket.emit("answer", answer);
     });
 
-    newSocket.on("answer", (answer) => {
-      pc.setRemoteDescription(answer);
+    newSocket.on("answer", async (answer) => {
+      await pc.setRemoteDescription(answer);
+      iceCandidateQueue.forEach(c => pc.addIceCandidate(c));
+      iceCandidateQueue.length = 0;
     });
 
-    const iceCandidateQueue: RTCIceCandidate[] = [];
     newSocket.on("candidate", (candidate) => {
       if (pc.remoteDescription && pc.remoteDescription.type) {
         pc.addIceCandidate(candidate);
@@ -80,10 +92,7 @@ export const SovereignChat: React.FC<SovereignChatProps> = ({ onClose, userSeedI
     });
 
     pc.oniceconnectionstatechange = () => {
-      if (pc.iceConnectionState === 'connected') {
-        iceCandidateQueue.forEach(c => pc.addIceCandidate(c));
-        iceCandidateQueue.length = 0;
-      }
+      console.log("ICE Connection State:", pc.iceConnectionState);
     };
 
     return () => {
@@ -119,7 +128,19 @@ export const SovereignChat: React.FC<SovereignChatProps> = ({ onClose, userSeedI
 
   const handleSendMessage = async (e?: React.FormEvent) => {
     e?.preventDefault();
-    if (!input.trim() || !dataChannel || dataChannel.readyState !== 'open') return;
+    if (!input.trim()) return;
+    
+    if (!dataChannel || dataChannel.readyState !== 'open') {
+      const systemMessage: Message = {
+        id: Date.now().toString(),
+        sender: "System",
+        role: "peer",
+        content: "Cannot send message. You are not connected to a peer.",
+        timestamp: Date.now(),
+      };
+      setMessages(prev => [...prev, systemMessage]);
+      return;
+    }
 
     dataChannel.send(input);
 
@@ -246,9 +267,8 @@ export const SovereignChat: React.FC<SovereignChatProps> = ({ onClose, userSeedI
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              disabled={!isConnected}
-              placeholder={isConnected ? "Broadcast to peer..." : "Not connected..."}
-              className="w-full bg-slate-900 border border-white/10 rounded-2xl py-4 pl-6 pr-14 text-white placeholder:text-slate-700 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/20 transition-all shadow-inner disabled:opacity-50"
+              placeholder={isConnected ? "Broadcast to peer..." : "Type a message (Connect first)..."}
+              className={`w-full bg-slate-900 border border-white/10 rounded-2xl py-4 pl-6 pr-14 text-white placeholder:text-slate-700 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/20 transition-all shadow-inner ${!isConnected ? "opacity-70" : ""}`}
             />
             <button
               type="submit"
