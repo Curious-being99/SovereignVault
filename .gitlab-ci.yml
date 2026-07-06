@@ -1,30 +1,66 @@
 image: node:22
 
+variables:
+  ANDROID_SDK_ROOT: "/opt/android-sdk"
+  npm_config_cache: "$CI_PROJECT_DIR/.npm"
+  GRADLE_USER_HOME: "$CI_PROJECT_DIR/android/.gradle"
+
 stages:
   - build
 
+cache:
+  key:
+    files:
+      - package-lock.json
+  paths:
+    - .npm/
+    - android/.gradle/
+
 build_android:
   stage: build
-  variables:
-    ANDROID_SDK_ROOT: "/opt/android-sdk"
   before_script:
+    # 1. Update package list and install system dependencies (including JDK 17 for modern Android building)
     - apt-get update && apt-get install -y curl unzip python3 make g++ openjdk-17-jdk git
+    
+    # 2. Set up Android SDK command-line tools directory structure
     - mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
-    - curl -o commandlinetools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-    - unzip commandlinetools.zip -d $ANDROID_SDK_ROOT/cmdline-tools
+    
+    # 3. Download and install commandline-tools
+    - curl --retry 3 --retry-delay 5 -o commandlinetools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+    - unzip -q commandlinetools.zip -d $ANDROID_SDK_ROOT/cmdline-tools
+    - rm commandlinetools.zip
     - mv $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest
+    
+    # 4. Set the path environment variable to include the newly downloaded SDK tools
     - export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+    
+    # 5. Automatically accept Android SDK licenses
     - yes | sdkmanager --licenses || true
+    
+    # 6. Pre-install the targeted platform & build tools (matches targetSdk 36 in variables.gradle)
     - sdkmanager "platforms;android-36" "platforms;android-34" "build-tools;34.0.0"
+
   script:
-    - npm install
+    # 1. Install frontend dependencies
+    - npm install --prefer-offline --no-audit
+    
+    # 2. Build the production React assets
     - npm run build
+    
+    # 3. Synchronize Capacitor assets & update native project plugins
     - npx cap sync android
+    
+    # 4. Navigate to Android project and download/set up a clean, non-corrupt Gradle Wrapper
     - cd android
-    - curl -L https://raw.githubusercontent.com/gradle/gradle/v8.14.3/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
+    - mkdir -p gradle/wrapper
+    - curl --retry 3 --retry-delay 5 -L https://raw.githubusercontent.com/gradle/gradle/v8.14.3/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
     - chmod +x gradlew
+    
+    # 5. Build Debug APK
     - ./gradlew assembleDebug
+
   artifacts:
+    name: "SovereignVault-Android-Debug"
     paths:
       - android/app/build/outputs/apk/debug/app-debug.apk
     expire_in: 1 week
