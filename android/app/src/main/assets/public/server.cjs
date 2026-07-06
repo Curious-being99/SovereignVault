@@ -28,6 +28,7 @@ var import_vite = require("vite");
 var import_better_sqlite3 = __toESM(require("better-sqlite3"), 1);
 var import_fs = __toESM(require("fs"), 1);
 var import_http = require("http");
+var import_socket = require("socket.io");
 var import_ws = require("ws");
 var import_os = __toESM(require("os"), 1);
 var import_crypto = __toESM(require("crypto"), 1);
@@ -175,11 +176,24 @@ var encryptionKey = import_crypto.default.createHash("sha256").update(VAULT_MAST
 function getUserEncryptionKey(userIdOrSeedId) {
   if (!userIdOrSeedId) return encryptionKey;
   let seedId = null;
+  let migrationKeyHex = null;
   if (typeof userIdOrSeedId === "number") {
-    const user = db.prepare("SELECT vaultSeedId FROM users WHERE id = ?").get(userIdOrSeedId);
+    const user = db.prepare("SELECT vaultSeedId, migrationUserKey FROM users WHERE id = ?").get(userIdOrSeedId);
     seedId = user?.vaultSeedId || null;
+    migrationKeyHex = user?.migrationUserKey || null;
   } else {
     seedId = userIdOrSeedId;
+  }
+  if (migrationKeyHex) {
+    try {
+      const wrapped = Buffer.from(migrationKeyHex, "hex");
+      return decryptBuffer(wrapped, encryptionKey);
+    } catch (e) {
+      console.error(
+        "[getUserEncryptionKey] Failed to unwrap migrationUserKey:",
+        e.message
+      );
+    }
   }
   if (!seedId) return encryptionKey;
   return import_crypto.default.createHmac("sha256", encryptionKey).update(seedId).digest();
@@ -265,6 +279,26 @@ function layeredDecryptBufferSync(buffer, masterKey) {
     aesDecipher.final()
   ]);
 }
+function encryptBuffer(buffer, key = encryptionKey) {
+  const { aesKey, chachaKey } = deriveLayeredKeys(key);
+  const aesIv = import_crypto.default.randomBytes(12);
+  const chachaIv = import_crypto.default.randomBytes(12);
+  const aesCipher = import_crypto.default.createCipheriv("aes-256-gcm", aesKey, aesIv);
+  const layer1 = Buffer.concat([aesCipher.update(buffer), aesCipher.final()]);
+  const aesTag = aesCipher.getAuthTag();
+  const chachaCipher = import_crypto.default.createCipheriv(
+    "chacha20-poly1305",
+    chachaKey,
+    chachaIv,
+    { authTagLength: 16 }
+  );
+  const layer2 = Buffer.concat([
+    chachaCipher.update(layer1),
+    chachaCipher.final()
+  ]);
+  const chachaTag = chachaCipher.getAuthTag();
+  return Buffer.concat([aesIv, chachaIv, aesTag, chachaTag, layer2]);
+}
 function decryptBuffer(buffer, key = encryptionKey) {
   if (!buffer) return buffer;
   if (buffer.length >= 56) {
@@ -344,22 +378,23 @@ var ShortBloomFilter = class {
   }
 };
 function buildMerkleRoot(chunks) {
+  const algorithm = "sha512";
   if (chunks.length === 0) {
-    return import_crypto.default.createHash("sha256").update(Buffer.alloc(0)).digest("hex");
+    return import_crypto.default.createHash(algorithm).update(Buffer.alloc(0)).digest("hex");
   }
   let currentLayer = chunks.map(
-    (chunk) => import_crypto.default.createHash("sha256").update(chunk).digest("hex")
+    (chunk) => import_crypto.default.createHash(algorithm).update(chunk).digest("hex")
   );
   while (currentLayer.length > 1) {
     const nextLayer = [];
     for (let i = 0; i < currentLayer.length; i += 2) {
       if (i + 1 < currentLayer.length) {
         nextLayer.push(
-          import_crypto.default.createHash("sha256").update(currentLayer[i] + currentLayer[i + 1]).digest("hex")
+          import_crypto.default.createHash(algorithm).update(currentLayer[i] + currentLayer[i + 1]).digest("hex")
         );
       } else {
         nextLayer.push(
-          import_crypto.default.createHash("sha256").update(currentLayer[i] + currentLayer[i]).digest("hex")
+          import_crypto.default.createHash(algorithm).update(currentLayer[i] + currentLayer[i]).digest("hex")
         );
       }
     }
@@ -368,8 +403,9 @@ function buildMerkleRoot(chunks) {
   return currentLayer[0];
 }
 function computeMerkleRoot(data) {
+  const algorithm = "sha512";
   if (!data) {
-    return import_crypto.default.createHash("sha256").update(Buffer.alloc(0)).digest("hex");
+    return import_crypto.default.createHash(algorithm).update(Buffer.alloc(0)).digest("hex");
   }
   let buffer;
   if (Buffer.isBuffer(data)) {
@@ -1161,12 +1197,14 @@ function runMigrations() {
       passwordSalt TEXT NOT NULL,
       joinedAt INTEGER NOT NULL,
       avatarColor TEXT,
-      autoLockInterval INTEGER DEFAULT 0
+      autoLockInterval INTEGER DEFAULT 0,
+      privateVaultId TEXT UNIQUE
     );
 
     CREATE TABLE IF NOT EXISTS files (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       userId INTEGER NOT NULL,
+      privateVaultId TEXT,
       name TEXT NOT NULL,
       data BLOB,
       type TEXT NOT NULL,
@@ -1179,6 +1217,14 @@ function runMigrations() {
       lastModified INTEGER NOT NULL,
       sigAlgorithm TEXT DEFAULT 'HMAC-SHA256',
       merkleRoot TEXT DEFAULT NULL,
+      deletedAt INTEGER,
+      originalFolderPath TEXT,
+      clientEncrypted INTEGER DEFAULT 1,
+      dagHash TEXT,
+      previousDagHash TEXT,
+      dagSignature TEXT,
+      vaultSeedId TEXT,
+      encryptionKey TEXT,
       FOREIGN KEY(userId) REFERENCES users(id)
     );
 
@@ -1218,7 +1264,10 @@ function runMigrations() {
     "ALTER TABLE files ADD COLUMN peerReceiverSeedId TEXT DEFAULT NULL",
     "ALTER TABLE mesh_shadow_blocks ADD COLUMN cryptoBlockNumber INTEGER DEFAULT 0",
     "ALTER TABLE mesh_shadow_blocks ADD COLUMN originalOwnerSeedId TEXT DEFAULT NULL",
-    "ALTER TABLE mesh_shadow_blocks ADD COLUMN peerReceiverSeedId TEXT DEFAULT NULL"
+    "ALTER TABLE mesh_shadow_blocks ADD COLUMN peerReceiverSeedId TEXT DEFAULT NULL",
+    "ALTER TABLE users ADD COLUMN migrationUserKey TEXT DEFAULT NULL",
+    "ALTER TABLE users ADD COLUMN privateVaultId TEXT DEFAULT NULL",
+    "ALTER TABLE files ADD COLUMN privateVaultId TEXT DEFAULT NULL"
   ];
   for (const m of migrations) {
     try {
@@ -1496,6 +1545,18 @@ function runStorageGarbageCollector() {
     console.log(
       `[StorageGC] Completed. Freed: ${(totalBytesFreed / (1024 * 1024)).toFixed(2)} MB. Purged orphans: ${deletedOrphanFilesCount} files, ${deletedOrphanChunksCount} chunks.`
     );
+    const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1e3;
+    const cutoffDate = Date.now() - THIRTY_DAYS_MS;
+    const trashFiles = db.prepare("SELECT id, name, merkleRoot FROM files WHERE deletedAt IS NOT NULL AND deletedAt < ?").all(cutoffDate);
+    if (trashFiles.length > 0) {
+      console.log(`[StorageGC] Auto-purging ${trashFiles.length} files from trash (older than 30 days)...`);
+      for (const f of trashFiles) {
+        db.prepare("DELETE FROM files WHERE id = ?").run(f.id);
+        safeDeletePhysicalFile(f.id, f.merkleRoot);
+        deletedTrashFilesCount++;
+      }
+      console.log(`[StorageGC] Trash cleanup complete. Purged: ${deletedTrashFilesCount} files.`);
+    }
   } catch (e) {
     console.error("[StorageGC] Error during storage garbage collection:", e);
   }
@@ -1866,6 +1927,11 @@ function rebuildUserDag(userId) {
 }
 async function startServer() {
   const app = (0, import_express.default)();
+  app.use((req, res, next) => {
+    res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+    res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
+    next();
+  });
   const PORT = 3e3;
   app.use(
     (0, import_compression.default)({
@@ -1935,6 +2001,10 @@ async function startServer() {
     } else {
       req.pipe(writeStream);
     }
+    writeStream.on("error", (err) => {
+      console.error("Write stream error:", err);
+      if (!res.headersSent) res.status(500).json({ error: "Stream write error" });
+    });
     writeStream.on("finish", () => {
       try {
         const argUserId = Number(metadata.userId);
@@ -2154,7 +2224,8 @@ async function startServer() {
       "SELECT dagHash FROM files WHERE userId = ? ORDER BY id DESC LIMIT 1"
     ).get(headerUserId);
     const expectedPrevHash = previousBlock ? previousBlock.dagHash : "GENESIS_BLOCK_000000000000000000000000000000";
-    const payloadToHash = `${expectedPrevHash}::${finalName}::${size}::${type}::${lastModified || Date.now()}::${mRoot}`;
+    const finalLastModified = lastModified || Date.now();
+    const payloadToHash = `${expectedPrevHash}::${finalName}::${size}::${type}::${finalLastModified}::${mRoot}`;
     const computedDagHash = import_crypto.default.createHash("sha256").update(payloadToHash).digest("hex");
     const computedDagSignature = import_crypto.default.createHmac("sha256", VAULT_MASTER_KEY).update(computedDagHash).digest("hex");
     let fileKeyStr = null;
@@ -2181,7 +2252,7 @@ async function startServer() {
         // senderName
         null,
         // shareNote
-        lastModified || Date.now(),
+        finalLastModified,
         clientEncrypted ? 1 : 0,
         expectedPrevHash,
         computedDagHash,
@@ -2277,6 +2348,10 @@ async function startServer() {
     } else {
       req.pipe(writeStream);
     }
+    writeStream.on("error", (err) => {
+      console.error("Write stream error:", err);
+      if (!res.headersSent) res.status(500).json({ error: "Stream write error" });
+    });
     writeStream.on("finish", () => {
       try {
         if (!import_fs.default.existsSync(chunkPath)) {
@@ -3160,7 +3235,9 @@ async function startServer() {
       return res.status(403).json({ error: "Access denied" });
     }
     try {
-      const shadowBlocks = db.prepare("SELECT * FROM mesh_shadow_blocks WHERE ownerId = ?").all(userId);
+      const user = db.prepare("SELECT vaultSeedId FROM users WHERE id = ?").get(userId);
+      const seedId = user?.vaultSeedId || null;
+      const shadowBlocks = db.prepare("SELECT * FROM mesh_shadow_blocks WHERE ownerId = ? OR vaultSeedId = ? OR originalOwnerSeedId = ?").all(userId, seedId, seedId);
       const validBlocks = [];
       for (const b of shadowBlocks) {
         try {
@@ -3296,7 +3373,14 @@ async function startServer() {
       });
     }
     const chunks = [];
+    let totalLength = 0;
+    const MAX_DB_SIZE = 100 * 1024 * 1024;
     req.on("data", (chunk) => {
+      totalLength += chunk.length;
+      if (totalLength > MAX_DB_SIZE) {
+        req.destroy(new Error("Payload too large"));
+        return;
+      }
       chunks.push(chunk);
     });
     req.on("end", () => {
@@ -3832,8 +3916,9 @@ async function startServer() {
       }
       const mRoot = file.merkleRoot || "GENESIS_MERKLE_ROOT_000000000000000000";
       const payloadToHash = `${expectedPrevHash}::${file.name}::${file.size}::${file.type}::${file.lastModified}::${mRoot}`;
-      const computedDagHash = import_crypto.default.createHash("sha256").update(payloadToHash).digest("hex");
-      const computedDagSignature = import_crypto.default.createHmac("sha256", VAULT_MASTER_KEY).update(computedDagHash).digest("hex");
+      const algorithm = "sha256";
+      const computedDagHash = import_crypto.default.createHash(algorithm).update(payloadToHash).digest("hex");
+      const computedDagSignature = import_crypto.default.createHmac(algorithm, VAULT_MASTER_KEY).update(computedDagHash).digest("hex");
       const isValid = file.dagHash === computedDagHash && file.dagSignature === computedDagSignature && file.previousDagHash === expectedPrevHash && file.merkleRoot === diskMerkleRoot;
       res.json({
         success: true,
@@ -3999,7 +4084,7 @@ async function startServer() {
   });
   app.post("/api/vault/import-pack", (req, res) => {
     console.log(`[VaultImport] Commencing identity restoration...`);
-    const { version, profile, files } = req.body;
+    const { version, profile, files, systemMasterKey } = req.body;
     if (!profile || !profile.username || !profile.passwordHash || !profile.passwordSalt) {
       return res.status(400).json({
         error: "Incompatible backup structure or missing profile definition."
@@ -4010,6 +4095,7 @@ async function startServer() {
         const existingUser = db.prepare("SELECT * FROM users WHERE username = ? COLLATE NOCASE").get(profile.username);
         let userId;
         const derivedSeedId = profile.vaultSeedId || import_crypto.default.createHmac("sha256", profile.passwordHash).update(profile.username.toLowerCase()).digest("hex");
+        const privateVaultId = profile.privateVaultId || import_crypto.default.createHash("sha256").update(derivedSeedId + "vault-id-isolation-constant").digest("hex").substring(0, 32);
         if (existingUser) {
           if (existingUser.passwordHash !== profile.passwordHash) {
             throw new Error(
@@ -4020,7 +4106,7 @@ async function startServer() {
           db.prepare(
             `
             UPDATE users 
-            SET displayName = ?, passwordHash = ?, passwordSalt = ?, avatarColor = ?, autoLockInterval = ?, vaultSeedId = ?
+            SET displayName = ?, passwordHash = ?, passwordSalt = ?, avatarColor = ?, autoLockInterval = ?, vaultSeedId = ?, privateVaultId = ?
             WHERE id = ?
           `
           ).run(
@@ -4030,6 +4116,7 @@ async function startServer() {
             profile.avatarColor || existingUser.avatarColor || "#6366f1",
             profile.autoLockInterval !== void 0 ? profile.autoLockInterval : existingUser.autoLockInterval,
             profile.vaultSeedId || derivedSeedId,
+            privateVaultId,
             userId
           );
         } else {
@@ -4040,8 +4127,8 @@ async function startServer() {
             if (!idTaken) {
               result = db.prepare(
                 `
-                INSERT INTO users (id, username, displayName, passwordHash, passwordSalt, joinedAt, avatarColor, autoLockInterval, vaultSeedId)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO users (id, username, displayName, passwordHash, passwordSalt, joinedAt, avatarColor, autoLockInterval, vaultSeedId, privateVaultId)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               `
               ).run(
                 idToTry,
@@ -4052,15 +4139,16 @@ async function startServer() {
                 profile.joinedAt || Date.now(),
                 profile.avatarColor || "#6366f1",
                 profile.autoLockInterval || 0,
-                profile.vaultSeedId || derivedSeedId
+                profile.vaultSeedId || derivedSeedId,
+                privateVaultId
               );
             }
           }
           if (!result) {
             result = db.prepare(
               `
-              INSERT INTO users (username, displayName, passwordHash, passwordSalt, joinedAt, avatarColor, autoLockInterval, vaultSeedId)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              INSERT INTO users (username, displayName, passwordHash, passwordSalt, joinedAt, avatarColor, autoLockInterval, vaultSeedId, privateVaultId)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             `
             ).run(
               profile.username,
@@ -4070,10 +4158,26 @@ async function startServer() {
               profile.joinedAt || Date.now(),
               profile.avatarColor || "#6366f1",
               profile.autoLockInterval || 0,
-              profile.vaultSeedId || derivedSeedId
+              profile.vaultSeedId || derivedSeedId,
+              privateVaultId
             );
           }
           userId = Number(result.lastInsertRowid);
+        }
+        if (systemMasterKey && systemMasterKey !== VAULT_MASTER_KEY) {
+          const oldSystemKey = import_crypto.default.createHash("sha256").update(systemMasterKey).digest();
+          const seedIdToUse = profile.vaultSeedId || derivedSeedId;
+          const oldUserKey = import_crypto.default.createHmac("sha256", oldSystemKey).update(seedIdToUse).digest();
+          const wrappedKey = encryptBuffer(oldUserKey, encryptionKey).toString(
+            "hex"
+          );
+          db.prepare("UPDATE users SET migrationUserKey = ? WHERE id = ?").run(
+            wrappedKey,
+            userId
+          );
+          console.log(
+            `[VaultImport] Stored wrapped migrationUserKey for user ${userId} to support server-level decryption migration.`
+          );
         }
         const existingFiles = db.prepare("SELECT * FROM files WHERE userId = ?").all(userId);
         const existingFilesLookup = /* @__PURE__ */ new Map();
@@ -4084,8 +4188,8 @@ async function startServer() {
         if (Array.isArray(files)) {
           const userVaultSeedId2 = getVaultSeedIdForUser(userId);
           const insertFileStmt = db.prepare(`
-            INSERT INTO files (userId, name, data, type, size, folderPath, isFolder, isShared, senderName, shareNote, lastModified, deletedAt, originalFolderPath, previousDagHash, dagHash, dagSignature, merkleRoot, vaultSeedId, clientEncrypted, encryptionKey)
-            VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO files (userId, name, data, type, size, folderPath, isFolder, isShared, senderName, shareNote, lastModified, deletedAt, originalFolderPath, previousDagHash, dagHash, dagSignature, merkleRoot, vaultSeedId, clientEncrypted, encryptionKey, privateVaultId)
+            VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `);
           for (const f of files) {
             const isFolderVal = f.isFolder ? 1 : 0;
@@ -4147,7 +4251,7 @@ async function startServer() {
                 db.prepare(
                   `
                   UPDATE files 
-                  SET type = ?, size = ?, isFolder = ?, isShared = ?, senderName = ?, shareNote = ?, lastModified = ?, deletedAt = ?, originalFolderPath = ?, previousDagHash = ?, dagHash = ?, dagSignature = ?, merkleRoot = ?, vaultSeedId = ?, clientEncrypted = ?, encryptionKey = ?
+                  SET type = ?, size = ?, isFolder = ?, isShared = ?, senderName = ?, shareNote = ?, lastModified = ?, deletedAt = ?, originalFolderPath = ?, previousDagHash = ?, dagHash = ?, dagSignature = ?, merkleRoot = ?, vaultSeedId = ?, clientEncrypted = ?, encryptionKey = ?, privateVaultId = ?
                   WHERE id = ?
                 `
                 ).run(
@@ -4167,6 +4271,7 @@ async function startServer() {
                   resolvedSeedId,
                   clientEncryptedVal,
                   f.encryptionKey || null,
+                  privateVaultId,
                   existingFile.id
                 );
               }
@@ -4190,7 +4295,8 @@ async function startServer() {
                 dagMetadata.merkleRoot,
                 resolvedSeedId,
                 clientEncryptedVal,
-                f.encryptionKey || null
+                f.encryptionKey || null,
+                privateVaultId
               );
               const insertedId = Number(info.lastInsertRowid);
               if (fileBuffer && fileBuffer.length > 0) {
@@ -4321,6 +4427,7 @@ async function startServer() {
   app.get("/api/users", (req, res) => {
     try {
       const users = db.prepare("SELECT id, username, displayName, joinedAt FROM users").all();
+      console.log(`[Auth] Serving metadata for ${users.length} workspace users.`);
       res.json(users);
     } catch (e) {
       console.error("Error fetching users:", e);
@@ -4334,8 +4441,12 @@ async function startServer() {
       passwordHash,
       passwordSalt,
       joinedAt,
-      autoLockInterval
+      autoLockInterval,
+      privateVaultId
     } = req.body;
+    if (!username || typeof username !== "string") {
+      return res.status(400).json({ error: "Username is required" });
+    }
     const colors = [
       "#6366f1",
       "#8b5cf6",
@@ -4350,8 +4461,9 @@ async function startServer() {
     const deterministicColor = colors[charSum % colors.length];
     try {
       const derivedSeedId = import_crypto.default.createHmac("sha256", passwordHash).update(username.toLowerCase()).digest("hex");
+      const computedPrivateVaultId = privateVaultId || import_crypto.default.createHash("sha256").update(derivedSeedId + "vault-id-isolation-constant").digest("hex").substring(0, 32);
       const stmt = db.prepare(
-        "INSERT INTO users (username, displayName, passwordHash, passwordSalt, joinedAt, avatarColor, autoLockInterval, vaultSeedId) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO users (username, displayName, passwordHash, passwordSalt, joinedAt, avatarColor, autoLockInterval, vaultSeedId, privateVaultId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
       );
       const info = stmt.run(
         username,
@@ -4361,7 +4473,8 @@ async function startServer() {
         joinedAt,
         deterministicColor,
         autoLockInterval || 0,
-        derivedSeedId
+        derivedSeedId,
+        computedPrivateVaultId
       );
       res.json({ id: info.lastInsertRowid, vaultSeedId: derivedSeedId });
     } catch (err) {
@@ -4378,13 +4491,17 @@ async function startServer() {
   }
   app.post("/api/login", (req, res) => {
     const { username, passwordHash, passwordSalt } = req.body;
+    if (!username || typeof username !== "string") {
+      return res.status(400).json({ error: "Username is required" });
+    }
     let user = db.prepare("SELECT * FROM users WHERE username = ? COLLATE NOCASE").get(username);
     if (!user) {
       try {
         const resolvedSalt = passwordSalt || computeDeterministicSaltHex(username);
         const derivedSeedId = import_crypto.default.createHmac("sha256", passwordHash).update(username.toLowerCase()).digest("hex");
+        const privateVaultId = import_crypto.default.createHash("sha256").update(derivedSeedId + "vault-id-isolation-constant").digest("hex").substring(0, 32);
         const stmt = db.prepare(
-          "INSERT INTO users (username, displayName, passwordHash, passwordSalt, joinedAt, avatarColor, autoLockInterval, vaultSeedId) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+          "INSERT INTO users (username, displayName, passwordHash, passwordSalt, joinedAt, avatarColor, autoLockInterval, vaultSeedId, privateVaultId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         );
         const colors = [
           "#6366f1",
@@ -4406,7 +4523,8 @@ async function startServer() {
           Date.now(),
           deterministicColor,
           0,
-          derivedSeedId
+          derivedSeedId,
+          privateVaultId
         );
         user = db.prepare("SELECT * FROM users WHERE id = ?").get(info.lastInsertRowid);
         console.log(
@@ -4443,6 +4561,9 @@ async function startServer() {
   });
   app.post("/api/get-salt", (req, res) => {
     const { username } = req.body;
+    if (!username || typeof username !== "string") {
+      return res.status(400).json({ error: "Username is required" });
+    }
     const user = db.prepare(
       "SELECT passwordSalt FROM users WHERE username = ? COLLATE NOCASE"
     ).get(username);
@@ -4922,6 +5043,10 @@ async function startServer() {
       } else {
         req.pipe(writeStream);
       }
+      writeStream.on("error", (err) => {
+        console.error("Write stream error:", err);
+        if (!res.headersSent) res.status(500).json({ error: "Stream write error" });
+      });
       writeStream.on("finish", () => {
         try {
           const existingFile = db.prepare("SELECT * FROM files WHERE id = ?").get(fileId);
@@ -5064,7 +5189,8 @@ async function startServer() {
       senderName,
       shareNote,
       lastModified,
-      clientEncrypted
+      clientEncrypted,
+      privateVaultId
     } = req.body;
     const headerUserId = Number(req.header("X-User-Id"));
     if (!headerUserId || headerUserId !== Number(userId)) {
@@ -5112,8 +5238,8 @@ async function startServer() {
       });
       const userVaultSeedId = getVaultSeedIdForUser(argUserId);
       const stmt = db.prepare(`
-        INSERT INTO files (userId, name, data, type, size, folderPath, isFolder, isShared, senderName, shareNote, lastModified, previousDagHash, dagHash, dagSignature, merkleRoot, vaultSeedId, clientEncrypted) 
-        VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO files (userId, name, data, type, size, folderPath, isFolder, isShared, senderName, shareNote, lastModified, previousDagHash, dagHash, dagSignature, merkleRoot, vaultSeedId, clientEncrypted, privateVaultId) 
+        VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const info = stmt.run(
         argUserId,
@@ -5131,7 +5257,8 @@ async function startServer() {
         dagMetadata.dagSignature,
         dagMetadata.merkleRoot,
         userVaultSeedId,
-        argClientEncrypted ? 1 : 0
+        argClientEncrypted ? 1 : 0,
+        privateVaultId || null
       );
       const insertedId = Number(info.lastInsertRowid);
       const filePath = getSecureFilePath(insertedId, dagMetadata.merkleRoot);
@@ -5159,7 +5286,8 @@ async function startServer() {
         clientEncrypted: argClientEncrypted,
         lastModified: argLastModified,
         ownerHint: getCurrentUserUsername(argUserId),
-        vaultSeedId: userVaultSeedId
+        vaultSeedId: userVaultSeedId,
+        privateVaultId
       };
       if (req.body.originalId) metaData.originalId = req.body.originalId;
       import_fs.default.writeFileSync(metaPath, JSON.stringify(metaData));
@@ -5427,10 +5555,34 @@ async function startServer() {
     });
   }
   const httpServer = (0, import_http.createServer)(app);
+  const io = new import_socket.Server(httpServer);
+  io.on("connection", (socket) => {
+    console.log("Socket.io connected:", socket.id);
+    socket.on("offer", (data) => {
+      console.log("Socket.io relaying offer from", socket.id);
+      socket.broadcast.emit("offer", data);
+    });
+    socket.on("answer", (data) => {
+      console.log("Socket.io relaying answer from", socket.id);
+      socket.broadcast.emit("answer", data);
+    });
+    socket.on("candidate", (data) => socket.broadcast.emit("candidate", data));
+    socket.on("disconnect", () => {
+      console.log("Socket.io disconnected:", socket.id);
+    });
+  });
   httpServer.setTimeout(6e5);
   httpServer.keepAliveTimeout = 65e3;
   httpServer.headersTimeout = 66e3;
-  const wss = new import_ws.WebSocketServer({ server: httpServer });
+  const wss = new import_ws.WebSocketServer({ noServer: true });
+  httpServer.on("upgrade", (request, socket, head) => {
+    if (request.url && request.url.startsWith("/socket.io/")) {
+      return;
+    }
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit("connection", ws, request);
+    });
+  });
   const clients = /* @__PURE__ */ new Map();
   wss.on("connection", (ws) => {
     const cid = Math.random().toString(36).substring(2, 10);
@@ -5531,9 +5683,19 @@ async function startServer() {
       }
     }
   });
-  httpServer.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
+  const startListen = (port) => {
+    httpServer.listen(port, "0.0.0.0", () => {
+      console.log(`Server running on http://localhost:${port}`);
+    }).on("error", (err) => {
+      if (err.code === "EADDRINUSE") {
+        console.log(`Port ${port} is busy, retrying...`);
+        setTimeout(() => startListen(port), 1e3);
+      } else {
+        console.error(err);
+      }
+    });
+  };
+  startListen(PORT);
   const gracefulShutdown = () => {
     console.log("Shutting down gracefully...");
     try {
