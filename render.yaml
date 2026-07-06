@@ -1,38 +1,23 @@
 # Render Blueprint Specification (render.yaml)
 # To deploy, connect your repository to Render (https://render.com) and import this blueprint.
 #
-# Configured for Render's paid Starter plan with a Persistent Disk to ensure your SQLite 
-# database is saved permanently across app restarts and deployments.
-#
-# Note: If you want to deploy on the 100% Free Plan (ephemeral storage), you can change 'starter' to 'free'
-# and comment out the 'disk' and 'DATABASE_PATH' lines below.
+# Configured for Render's 100% Free Plan (No credit card or payment required).
+# Note: On the free plan, database storage is ephemeral (data resets when the app redeploys or restarts).
 
 services:
   - type: web
     name: sovereign-vault
     runtime: node
-    plan: starter # Starter plan is required for attaching a persistent disk
+    plan: free
     buildCommand: npm install && npm run build
     startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
 
-      # Points the SQLite database file to the persistent mount path
-      - key: DATABASE_PATH
-        value: /var/data/vault.db
-
       # Generates a high-entropy master encryption key automatically on deployment
       - key: VAULT_DB_KEY
         generateValue: true
 
-      # The external URL of your web service on Render
-      - key: APP_URL
-        value: https://sovereign-vault.onrender.com
-
-    disk:
-      name: sovereign-vault-data
-      mountPath: /var/data
-      sizeGB: 10 # Set to your desired size (e.g. 10GB, 50GB, etc.)
 
 
