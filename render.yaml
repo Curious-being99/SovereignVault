@@ -1,15 +1,17 @@
 # Render Blueprint Specification (render.yaml)
 # To deploy, connect your repository to Render (https://render.com) and import this blueprint.
 #
-# Defaults to Render's 100% Free Plan with Ephemeral Storage (No Setup / No Paid Card Required).
-# If you decide to upgrade to a paid Starter plan later to keep your vault data persistent 
-# across restarts, simply uncomment the 'disk' and 'DATABASE_PATH' lines below.
+# Configured for Render's paid Starter plan with a Persistent Disk to ensure your SQLite 
+# database is saved permanently across app restarts and deployments.
+#
+# Note: If you want to deploy on the 100% Free Plan (ephemeral storage), you can change 'starter' to 'free'
+# and comment out the 'disk' and 'DATABASE_PATH' lines below.
 
 services:
   - type: web
     name: sovereign-vault
     runtime: node
-    plan: free # Change to 'starter' if you want to use persistent disks
+    plan: starter # Starter plan is required for attaching a persistent disk
     buildCommand: npm install && npm run build
     startCommand: npm start
     envVars:
@@ -17,23 +19,20 @@ services:
         value: production
 
       # Points the SQLite database file to the persistent mount path
-      # Uncomment this only if using a persistent disk (requires paid plan)
-      # - key: DATABASE_PATH
-      #   value: /var/data/vault.db
+      - key: DATABASE_PATH
+        value: /var/data/vault.db
 
       # Generates a high-entropy master encryption key automatically on deployment
       - key: VAULT_DB_KEY
         generateValue: true
 
-      # The external URL of your web service on Render (e.g., https://your-subdomain.onrender.com)
-      # You can copy and paste the Render service URL here after creation.
+      # The external URL of your web service on Render
       - key: APP_URL
-        sync: false
+        value: https://sovereign-vault.onrender.com
 
-    # Paid Plan Feature (Requires 'starter' plan or higher):
-    # Uncomment the disk configuration below if you want persistent storage.
-    # disk:
-    #   name: sovereign-vault-data
-    #   mountPath: /var/data
-    #   sizeGB: 1
+    disk:
+      name: sovereign-vault-data
+      mountPath: /var/data
+      sizeGB: 10 # Set to your desired size (e.g. 10GB, 50GB, etc.)
+
 
