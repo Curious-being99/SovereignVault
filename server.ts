@@ -195,7 +195,7 @@ class WrappedDatabase extends OriginalDatabase {
   }
 }
 // Initialize SQLite database
-const dbPath = process.env.DATABASE_PATH || path.join(process.cwd(), "vault.db");
+const dbPath = path.join(process.cwd(), "vault.db");
 let db = new WrappedDatabase(dbPath);
 
 // Tune database settings for infinite scale & concurrent execution safety
