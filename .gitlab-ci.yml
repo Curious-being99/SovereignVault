@@ -21,6 +21,7 @@ build_android:
     - npm run build
     - npx cap sync android
     - cd android
+    - curl -L https://raw.githubusercontent.com/gradle/gradle/v8.14.3/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
     - chmod +x gradlew
     - ./gradlew assembleDebug
   artifacts:
