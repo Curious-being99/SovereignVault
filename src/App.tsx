@@ -107,6 +107,7 @@ import { TransferRecord, StoragePoint } from "./types";
 import { TransferHistoryModal } from "./components/TransferHistoryModal";
 import { DagVerificationModal } from "./components/DagVerificationModal";
 import { ConfirmationModal } from "./components/ConfirmationModal";
+import { DecentralizedSyncConsole } from "./components/DecentralizedSyncConsole";
 
 import { StorageUsageChart } from "./components/StorageUsageChart";
 import { NetworkDocsDrawer } from "./components/NetworkDocsDrawer";
@@ -762,6 +763,40 @@ export default function App() {
     }
   };
 
+  const getEncryptedDatabaseHex = async (): Promise<string> => {
+    if (!currentUser || !currentUser.id) return "";
+    const buffer = await api.downloadRawDatabase(currentUser.id);
+    const bytes = new Uint8Array(buffer);
+    let hex = "";
+    for (let i = 0; i < bytes.length; i++) {
+      hex += bytes[i].toString(16).padStart(2, "0");
+    }
+    return hex;
+  };
+
+  const restoreDatabaseFromHex = async (hex: string): Promise<void> => {
+    if (!currentUser || !currentUser.id) return;
+    setIsRestoring(true);
+    try {
+      const bytes = new Uint8Array(hex.length / 2);
+      for (let i = 0; i < bytes.length; i++) {
+        bytes[i] = parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+      }
+      const res = await api.restoreRawDatabase(currentUser.id, bytes.buffer);
+      if (res.success) {
+        showToast("Physical partition successfully restored! Syncing workspace...", "success");
+        await refreshData();
+      } else {
+        throw new Error(res.message || "Decentralized database restoration rejected.");
+      }
+    } catch (err: any) {
+      showToast(err.message || "Failed to restore database from decentralized source.", "error");
+      throw err;
+    } finally {
+      setIsRestoring(false);
+    }
+  };
+
   const [syncStatus, setSyncStatus] = useState<{ total: number; done: number; active: boolean } | null>(null);
 
   const syncMissingFileContentsInBackground = async (userId: number, fileList: FileData[]) => {
@@ -837,7 +872,7 @@ export default function App() {
   const [syncConflict, setSyncConflict] = useState<SyncConflict | null>(null);
   const [mobileActiveTab, setMobileActiveTab] = useState<"files" | "mesh">("files");
 
-  const [settingsTab, setSettingsTab] = useState<"general" | "security" | "network" | "health" | "bounty" >(() => {
+  const [settingsTab, setSettingsTab] = useState<"general" | "security" | "network" | "health" | "bounty" | "decentralized">(() => {
     return (sessionStorage.getItem("vault_settings_tab") as any) || "general";
   });
 
@@ -7096,6 +7131,7 @@ export default function App() {
                     { id: "general", label: "NODE CONFIG", mobileLabel: "Config", icon: Database },
                     { id: "security", label: "VAULT SECURITY", mobileLabel: "Security", icon: Shield },
                     { id: "network", label: "NETWORK MESH", mobileLabel: "Network", icon: Globe },
+                    { id: "decentralized", label: "DECENTRALIZED SYNC", mobileLabel: "Decentralized", icon: Cpu },
                   ].map((tab) => (
                     <button
                       key={tab.id}
@@ -7900,6 +7936,21 @@ export default function App() {
                           </div>
                         )}
                       </div>
+                    </motion.div>
+                  )}
+
+                  {settingsTab === "decentralized" && (
+                    <motion.div
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="space-y-10 pb-10"
+                    >
+                      <DecentralizedSyncConsole
+                        currentUser={currentUser}
+                        onGetEncryptedDatabaseHex={getEncryptedDatabaseHex}
+                        onRestoreDatabase={restoreDatabaseFromHex}
+                        showToast={showToast}
+                      />
                     </motion.div>
                   )}
 
