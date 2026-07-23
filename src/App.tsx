@@ -258,17 +258,23 @@ export default function App() {
 
     const interval = setInterval(() => {
       const inactiveTime = Date.now() - lastActivityTime;
-      if (inactiveTime > 5 * 60 * 1000) { // 5 minutes
+      if (inactiveTime > 2 * 60 * 1000) { // 2 minutes
+        // Don't let it affect active uploads!
+        const hasActiveUploads = activeTransfers.some(t => t.type === 'upload' && t.status === 'active');
+        if (hasActiveUploads) {
+          console.log("[Security] Deferring 2-minute inactivity auto-lock because an upload is in progress.");
+          return;
+        }
         setIsSessionLocked(true);
         showToast("Session locked due to inactivity. 🛡️", "info");
       }
-    }, 30000); // Check every 30 seconds
+    }, 10000); // Check every 10 seconds for high precision
 
     return () => {
       activityEvents.forEach(event => window.removeEventListener(event, handleActivity));
       clearInterval(interval);
     };
-  }, [currentUser, isSessionLocked, lastActivityTime]);
+  }, [currentUser, isSessionLocked, lastActivityTime, activeTransfers]);
 
   useEffect(() => {
     const handleOnline = () => {
@@ -3795,12 +3801,21 @@ export default function App() {
           clearTimeout(backgroundLockTimerRef.current);
         }
 
-        backgroundLockTimerRef.current = setTimeout(() => {
-          console.log("[Security] 2-minute timer expired while backgrounded. Locking workspace.");
+        const checkAndLock = () => {
+          const hasActiveUploads = activeTransfers.some(t => t.type === 'upload' && t.status === 'active');
+          if (hasActiveUploads) {
+            console.log("[Security] Active upload in progress. Deferring 2-minute background auto-lock.");
+            backgroundLockTimerRef.current = setTimeout(checkAndLock, 10000); // Check again in 10 seconds
+            return;
+          }
+          console.log("[Security] 2-minute timer expired with no active uploads. Locking workspace.");
           setSessionPassword("");
+          setIsSessionLocked(true); // Ensure session lock is visually applied
           localStorage.removeItem("vault_session_password");
           backgroundLockTimerRef.current = null;
-        }, 120000); // 2 minutes (120,000 ms)
+        };
+
+        backgroundLockTimerRef.current = setTimeout(checkAndLock, 120000); // 2 minutes (120,000 ms)
       } else if (document.visibilityState === "visible") {
         // App is foregrounded
         if (backgroundLockTimerRef.current) {
@@ -3838,7 +3853,7 @@ export default function App() {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("beforeunload", handleBeforeUnload);
     };
-  }, [biometricAutoUnlock, currentUser, sessionPassword, handleBiometricLogin]);
+  }, [biometricAutoUnlock, currentUser, sessionPassword, handleBiometricLogin, activeTransfers]);
 
   // Auto-unlock on initial app launch or when locked if biometric auto-unlock is enabled OR if they have saved credentials
   useEffect(() => {

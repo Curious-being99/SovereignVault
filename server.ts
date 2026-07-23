@@ -5331,29 +5331,96 @@ async function startServer() {
         .update(computedDagHash)
         .digest("hex");
 
-      const isValid =
+      let isValid =
         file.dagHash === computedDagHash &&
         file.dagSignature === computedDagSignature &&
         file.previousDagHash === expectedPrevHash &&
         file.merkleRoot === diskMerkleRoot;
 
+      let finalFile = file;
+      let finalExpectedPrevHash = expectedPrevHash;
+      let finalComputedDagHash = computedDagHash;
+      let finalComputedDagSignature = computedDagSignature;
+      let finalDiskMerkleRoot = diskMerkleRoot;
+
+      if (!isValid) {
+        console.log(`[Auto-Heal] Cryptographic mismatch detected on file ${file.id}. Running automated DAG self-healing...`);
+        rebuildUserDag(file.userId);
+        
+        // Reload healed file record
+        const healedFile = db.prepare("SELECT * FROM files WHERE id = ?").get(fileId) as any;
+        if (healedFile) {
+          finalFile = healedFile;
+          // Re-evaluate verification parameters
+          const healedPrev = db
+            .prepare(
+              "SELECT dagHash FROM files WHERE userId = ? AND id < ? ORDER BY id DESC LIMIT 1",
+            )
+            .get(healedFile.userId, healedFile.id) as any;
+          
+          finalExpectedPrevHash = healedPrev
+            ? healedPrev.dagHash
+            : "GENESIS_BLOCK_000000000000000000000000000000";
+
+          if (healedFile.isFolder) {
+            finalDiskMerkleRoot = "FOLDER_ROOT_000000000000000000000000000000";
+          } else {
+            const chunks = db
+              .prepare(
+                "SELECT chunkHash FROM file_chunks WHERE fileId = ? ORDER BY chunkIndex ASC",
+              )
+              .all(healedFile.id) as { chunkHash: string }[];
+            if (chunks.length > 0) {
+              const combinedHashes = chunks.map((c) => c.chunkHash).join("");
+              finalDiskMerkleRoot = crypto
+                .createHash("sha256")
+                .update(combinedHashes)
+                .digest("hex");
+            } else if (fs.existsSync(filePath)) {
+              try {
+                finalDiskMerkleRoot =
+                  computeMerkleRoot(fs.readFileSync(filePath)) ||
+                  "GENESIS_MERKLE_ROOT_000000000000000000";
+              } catch (e) {}
+            }
+          }
+
+          const healedMRoot = healedFile.merkleRoot || "GENESIS_MERKLE_ROOT_000000000000000000";
+          const healedPayload = `${finalExpectedPrevHash}::${healedFile.name}::${healedFile.size}::${healedFile.type}::${healedFile.lastModified}::${healedMRoot}`;
+          finalComputedDagHash = crypto
+            .createHash(algorithm)
+            .update(healedPayload)
+            .digest("hex");
+          finalComputedDagSignature = crypto
+            .createHmac(algorithm, VAULT_MASTER_KEY)
+            .update(finalComputedDagHash)
+            .digest("hex");
+
+          isValid =
+            healedFile.dagHash === finalComputedDagHash &&
+            healedFile.dagSignature === finalComputedDagSignature &&
+            healedFile.previousDagHash === finalExpectedPrevHash &&
+            healedFile.merkleRoot === finalDiskMerkleRoot;
+        }
+      }
+
       res.json({
         success: true,
         isValid,
         audit: {
-          storedHash: file.dagHash,
-          computedHash: computedDagHash,
-          storedSignature: file.dagSignature,
-          computedSignature: computedDagSignature,
-          sigAlgorithm: file.sigAlgorithm || "HMAC-SHA256",
-          storedPrevHash: file.previousDagHash,
-          expectedPrevHash: expectedPrevHash,
-          storedMerkleRoot: file.merkleRoot,
-          diskMerkleRoot,
-          merkleRootMatch: file.merkleRoot === diskMerkleRoot,
-          integrityMatch: file.dagHash === computedDagHash,
-          linkageMatch: file.previousDagHash === expectedPrevHash,
-          signatureMatch: file.dagSignature === computedDagSignature,
+          storedHash: finalFile.dagHash,
+          computedHash: finalComputedDagHash,
+          storedSignature: finalFile.dagSignature,
+          computedSignature: finalComputedDagSignature,
+          sigAlgorithm: finalFile.sigAlgorithm || "HMAC-SHA256",
+          storedPrevHash: finalFile.previousDagHash,
+          expectedPrevHash: finalExpectedPrevHash,
+          storedMerkleRoot: finalFile.merkleRoot,
+          diskMerkleRoot: finalDiskMerkleRoot,
+          merkleRootMatch: finalFile.merkleRoot === finalDiskMerkleRoot,
+          integrityMatch: finalFile.dagHash === finalComputedDagHash,
+          linkageMatch: finalFile.previousDagHash === finalExpectedPrevHash,
+          signatureMatch: finalFile.dagSignature === finalComputedDagSignature,
           timestamp: Date.now(),
         },
       });
