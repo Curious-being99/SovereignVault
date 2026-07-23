@@ -30,7 +30,7 @@ interface NetworkDocsDrawerProps {
 }
 
 export function NetworkDocsDrawer({ isOpen, onClose, localPeerId }: NetworkDocsDrawerProps) {
-  const [activeTab, setActiveTab] = useState<"architecture" | "multiaddr" | "handshake" | "dag" | "storage" | "recovery">("architecture");
+  const [activeTab, setActiveTab] = useState<"architecture" | "multiaddr" | "handshake" | "dag" | "storage" | "recovery" | "daemon">("architecture");
   
   // Interactive Sandbox state: Multiaddr parsing
   const [testMultiaddr, setTestMultiaddr] = useState("/ip4/192.168.1.100/tcp/3000/p2p/QmTEkTbZuDXxCrC3vSrJniQZVkrCt74bemuhKS1EtRdPW");
@@ -158,6 +158,12 @@ export function NetworkDocsDrawer({ isOpen, onClose, localPeerId }: NetworkDocsD
                 className={`text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl transition-all whitespace-nowrap shrink-0 ${activeTab === "recovery" ? "bg-indigo-600/20 text-indigo-300 border border-indigo-500/20" : "text-white/40 hover:text-white/60 hover:bg-white/5"}`}
               >
                 6. Sovereign Recovery
+              </button>
+              <button
+                onClick={() => setActiveTab("daemon")}
+                className={`text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl transition-all whitespace-nowrap shrink-0 ${activeTab === "daemon" ? "bg-indigo-600/20 text-indigo-300 border border-indigo-500/20" : "text-white/40 hover:text-white/60 hover:bg-white/5"}`}
+              >
+                7. Sovereign Node CLI
               </button>
             </div>
 
@@ -678,6 +684,101 @@ export function NetworkDocsDrawer({ isOpen, onClose, localPeerId }: NetworkDocsD
                     </div>
                     <p className="text-[11px] text-indigo-200/40 leading-relaxed">
                       Once threshold <strong className="text-white">K</strong> is met, <strong className="text-indigo-300">Reed-Solomon</strong> error correction repairs packet drops on-the-fly. Final decryption occurs natively within the <strong className="text-white">Secure Enclave</strong>.
+                    </p>
+                  </div>
+                </motion.div>
+              )}
+
+              {/* Sovereign Node CLI Daemon Tab */}
+              {activeTab === "daemon" && (
+                <motion.div 
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="space-y-6 text-left"
+                >
+                  <div className="bg-gradient-to-tr from-indigo-500/5 to-transparent p-5 rounded-2xl border border-indigo-500/10 space-y-3">
+                    <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest">Independent Node Peer</span>
+                    <h3 className="text-lg font-black text-white leading-tight">Sovereign P2P Mesh Node Daemon</h3>
+                    <p className="text-xs text-indigo-200/60 leading-relaxed">
+                      Deploy a native, lightning-fast Node.js daemon client on your machine, server, or Android mobile device (via Termux). This establishes an active peer identity that consensus-mines, onion-routes, and synchronizes files entirely from your command-line interface.
+                    </p>
+                  </div>
+
+                  {/* Standard Setup */}
+                  <div className="space-y-4">
+                    <h4 className="text-[11px] font-black uppercase text-indigo-300/50 tracking-wider">How to Run Natively on Any System</h4>
+                    <div className="bg-white/[0.02] border border-white/5 p-4 rounded-xl space-y-4">
+                      <div className="space-y-2">
+                        <span className="text-xs font-bold text-white uppercase tracking-wider block">1. Obtain the Source Code</span>
+                        <p className="text-[11px] text-indigo-200/50 leading-relaxed">
+                          Clone your repository or download the complete source code folder. Once you have it, navigate into the directory in your terminal:
+                        </p>
+                        <pre className="bg-black/60 p-3 rounded-lg border border-indigo-500/10 text-[10px] font-mono text-indigo-300 overflow-x-auto select-all">
+{`git clone <your-github-repo-url>
+cd <your-repo-folder>
+npm install`}
+                        </pre>
+                      </div>
+
+                      <div className="space-y-2">
+                        <span className="text-xs font-bold text-white uppercase tracking-wider block">2. Execute the Sovereign Client</span>
+                        <p className="text-[11px] text-indigo-200/50 leading-relaxed">
+                          Boot the lightweight node daemon using standard Node.js. It requires zero configuration and immediately generates safe Ed25519 & X25519 keypacks inside <code className="text-amber-300 font-mono">node-identity.json</code>:
+                        </p>
+                        <pre className="bg-black/60 p-3 rounded-lg border border-indigo-500/10 text-[10px] font-mono text-indigo-300 overflow-x-auto select-all">
+{`node sovereign-node.js`}
+                        </pre>
+                      </div>
+
+                      <div className="space-y-2">
+                        <span className="text-xs font-bold text-white uppercase tracking-wider block">3. In-Terminal CLI Prompts</span>
+                        <p className="text-[11px] text-indigo-200/50 leading-relaxed">
+                          Once active, the terminal switches to an interactive shell <code className="text-emerald-400 font-mono">sovereign@mesh:~#</code>. You can run:
+                        </p>
+                        <div className="grid grid-cols-2 gap-2 text-[10px] font-mono bg-black/40 p-3 rounded-lg text-indigo-200/70 border border-white/5">
+                          <div><span className="text-white font-bold">status</span> - Telemetry dashboards</div>
+                          <div><span className="text-white font-bold">peers</span> - Sync swarm network nodes</div>
+                          <div><span className="text-white font-bold">mine-dag</span> - Run Proof-of-Consensus</div>
+                          <div><span className="text-white font-bold">route-onion</span> - Manually inject layered messages</div>
+                          <div><span className="text-white font-bold">keypack</span> - Print cryptographic keys</div>
+                          <div><span className="text-white font-bold">exit</span> - Terminate safely</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Android Termux Mobile Setup */}
+                  <div className="space-y-4">
+                    <h4 className="text-[11px] font-black uppercase text-fuchsia-300/50 tracking-wider">How to Run on Mobile (Android via Termux)</h4>
+                    <div className="bg-fuchsia-500/[0.02] border border-fuchsia-500/10 p-5 rounded-2xl space-y-4">
+                      <div className="flex items-center gap-3">
+                        <Terminal className="w-4 h-4 text-fuchsia-400" />
+                        <span className="text-xs font-black text-white uppercase tracking-wider">Deploy a Mobile Terminal Node</span>
+                      </div>
+                      <p className="text-[11px] text-indigo-200/50 leading-relaxed">
+                        To run the node daemon 24/7 on your phone, download **Termux** (available via F-Droid), open it, and issue:
+                      </p>
+                      <pre className="bg-black/60 p-3 rounded-lg border border-fuchsia-500/10 text-[10px] font-mono text-fuchsia-300 overflow-x-auto select-all">
+{`# Update and install dependencies
+pkg update && pkg upgrade -y
+pkg install nodejs git -y
+
+# Clone, navigate, and boot
+git clone <your-github-repo-url>
+cd <your-repo-folder>
+npm install
+node sovereign-node.js`}
+                      </pre>
+                    </div>
+                  </div>
+
+                  <div className="bg-black/40 p-5 rounded-2xl border border-white/5 space-y-2">
+                    <div className="flex items-center gap-3">
+                      <HelpCircle className="w-4 h-4 text-indigo-400" />
+                      <span className="text-xs font-black text-white uppercase tracking-wider">Zero Setup, Direct Native Speed</span>
+                    </div>
+                    <p className="text-[11px] text-indigo-200/40 leading-relaxed">
+                      The daemon runs natively under Node.js with zero external library overhead, leveraging Node's built-in <strong className="text-white">crypto</strong> library for fast Ed25519 signatures and X25519 ECDH key generation.
                     </p>
                   </div>
                 </motion.div>
