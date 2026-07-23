@@ -6,7 +6,7 @@ export default [
     ignores: ["node_modules", "dist", "vite.config.ts"]
   },
   {
-    files: ["src/**/*.{ts,tsx}"],
+    files: ["src/**/*.{ts,tsx}", "server.ts"],
     languageOptions: {
       parser: typescriptEslintParser,
       parserOptions: {

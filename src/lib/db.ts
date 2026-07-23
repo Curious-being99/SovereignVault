@@ -38,8 +38,11 @@ export interface FileData {
   peerReceiverSeedId?: string | null;
   originalId?: number;
   merkleRoot?: string;
+  kaspaL1Anchor?: string;
+  kaspaL1Score?: number;
   isOfflineOnly?: boolean; // true = never show when online
   createdOffline?: boolean;
+  _opfsNative?: boolean;
   lastSynced?: number | null;
   syncStatus?: 'pending' | 'synced' | 'conflict' | 'local-only';
 }

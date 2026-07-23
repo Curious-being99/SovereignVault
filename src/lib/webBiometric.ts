@@ -1,17 +1,11 @@
-/**
- * QuantumSecureVault - Sovereign Web Biometric & Passkey Enclave
- * Provides E2E zero-knowledge, browser-native biometrics via WebAuthn
- * and non-extractable Hardware/Sandbox-protected SubtleCrypto Keys.
- */
-
-const ENCLAVE_DB_NAME = "SovereignBiometricEnclave";
-const ENCLAVE_STORE_NAME = "credentials";
+const ENCLAVE_DB_NAME = "WebEnclave";
+const ENCLAVE_STORE_NAME = "key_store";
 
 function openEnclaveDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(ENCLAVE_DB_NAME, 1);
-    request.onupgradeneeded = () => {
-      const db = request.result;
+    const request = indexedDB.open(ENCLAVE_DB_NAME, 2);
+    request.onupgradeneeded = (e: IDBVersionChangeEvent) => {
+      const db = (e.target as IDBOpenDBRequest).result;
       if (!db.objectStoreNames.contains(ENCLAVE_STORE_NAME)) {
         db.createObjectStore(ENCLAVE_STORE_NAME);
       }
@@ -55,9 +49,6 @@ export function isWebBiometricSupported(): boolean {
   return typeof window !== "undefined" && !!window.crypto && !!window.crypto.subtle && !!window.indexedDB;
 }
 
-/**
- * Checks if biometric credentials have been saved for a user in this browser enclave.
- */
 export async function hasWebBiometric(username: string): Promise<boolean> {
   if (!isWebBiometricSupported()) return false;
   const cleanUsername = username.trim().toLowerCase();
@@ -70,23 +61,21 @@ export async function hasWebBiometric(username: string): Promise<boolean> {
   }
 }
 
-/**
- * Saves credentials inside the secure local Web Enclave.
- * Generates a non-extractable cryptographic key and leverages WebAuthn Passkeys.
- */
 export async function saveWebBiometric(username: string, password: string): Promise<boolean> {
   if (!isWebBiometricSupported()) return false;
   const cleanUsername = username.trim().toLowerCase();
+  
+  let prfSupported = false;
+  let prfSalt = window.crypto.getRandomValues(new Uint8Array(32));
+  let hardwareDerivedKey: CryptoKey | null = null;
 
   try {
-    // 1. Try to register a WebAuthn platform passkey for biometric presence validation
     if (window.PublicKeyCredential) {
       try {
         const challenge = window.crypto.getRandomValues(new Uint8Array(32));
         const userId = window.crypto.getRandomValues(new Uint8Array(16));
         
-        // This prompts the native Windows Hello, Mac TouchID/FaceID, iOS/Android biometric dialogue
-        const credential = await navigator.credentials.create({
+        const createOptions: any = {
           publicKey: {
             challenge,
             rp: { name: "Quantum Secure Vault", id: window.location.hostname },
@@ -96,55 +85,77 @@ export async function saveWebBiometric(username: string, password: string): Prom
               displayName: cleanUsername,
             },
             pubKeyCredParams: [
-              { type: "public-key", alg: -7 }, // ES256
-              { type: "public-key", alg: -257 }, // RS256
+              { type: "public-key", alg: -7 },
+              { type: "public-key", alg: -257 },
             ],
             authenticatorSelection: {
               authenticatorAttachment: "platform",
               userVerification: "required",
               residentKey: "preferred",
             },
-            timeout: 60000,
+            timeout: 120000, // Increased timeout for slow hardware/external keys
+            extensions: {
+              prf: {
+                eval: {
+                  first: prfSalt
+                }
+              }
+            }
           },
-        }) as PublicKeyCredential;
+        };
 
+        const credential = await navigator.credentials.create(createOptions) as any;
+        
         if (credential) {
-          // Store the credential ID to target it during login (prevents "No passkeys" prompt)
           await setEnclaveValue(`webauthn_id_${cleanUsername}`, credential.id);
+          
+          const extResults = credential.getClientExtensionResults();
+          if (extResults.prf && extResults.prf.results && extResults.prf.results.first) {
+             const prfOutput = new Uint8Array(extResults.prf.results.first);
+             console.log("[Enclave] WebAuthn PRF Supported! Derived hardware key.");
+             prfSupported = true;
+             
+             // Import PRF output as raw AES-GCM key
+             hardwareDerivedKey = await window.crypto.subtle.importKey(
+               "raw",
+               prfOutput,
+               { name: "AES-GCM" },
+               false,
+               ["encrypt", "decrypt"]
+             );
+             await setEnclaveValue(`prf_salt_${cleanUsername}`, prfSalt);
+          } else {
+             console.log("[Enclave] WebAuthn PRF not supported by authenticator. Falling back to IDB Sandbox.");
+          }
         }
       } catch (authErr) {
-        console.warn("WebAuthn platform registration skipped/cancelled, relying on secure key sandbox:", authErr);
+        console.warn("WebAuthn platform registration failed/skipped:", authErr);
       }
     }
 
-    // 2. Generate an AES-GCM 256-bit Key with extractable: false
-    // This key can NEVER be read by JavaScript (cannot leak to hackers or third party scripts),
-    // but the browser's cryptographic engine can use it to encrypt/decrypt payloads inside the sandbox.
-    const key = await window.crypto.subtle.generateKey(
-      {
-        name: "AES-GCM",
-        length: 256,
-      },
-      false, // non-extractable! Crucial for military-grade protection
-      ["encrypt", "decrypt"]
-    );
+    // Fallback: If PRF not supported or failed, generate random IDB key
+    let encryptionKey = hardwareDerivedKey;
+    if (!encryptionKey) {
+       encryptionKey = await window.crypto.subtle.generateKey(
+         { name: "AES-GCM", length: 256 },
+         false, // non-extractable
+         ["encrypt", "decrypt"]
+       );
+       await setEnclaveValue(`key_${cleanUsername}`, encryptionKey);
+    }
 
-    // 3. Encrypt the password using this non-extractable key
     const encoder = new TextEncoder();
     const iv = window.crypto.getRandomValues(new Uint8Array(12));
     const encryptedData = await window.crypto.subtle.encrypt(
       { name: "AES-GCM", iv },
-      key,
+      encryptionKey!,
       encoder.encode(password)
     );
 
-    // 4. Store the encrypted data and the non-extractable key inside IndexedDB
-    // Because Web Crypto allows storing 'CryptoKey' instances directly in IndexedDB,
-    // the non-extractable security properties are perfectly preserved!
-    await setEnclaveValue(`key_${cleanUsername}`, key);
     await setEnclaveValue(`cred_${cleanUsername}`, {
       iv: ArrayBuffer.isView(iv) ? iv.buffer : iv,
       ciphertext: encryptedData,
+      isPrf: prfSupported
     });
 
     return true;
@@ -154,31 +165,25 @@ export async function saveWebBiometric(username: string, password: string): Prom
   }
 }
 
-/**
- * Verifies user identity via WebAuthn, retrieves the non-extractable key,
- * and decrypts the master password to unlock the workspace offline.
- */
 export async function getWebBiometric(username: string): Promise<string> {
   if (!isWebBiometricSupported()) {
     throw new Error("Sovereign biometric enclave is not supported on this browser.");
   }
   const cleanUsername = username.trim().toLowerCase();
-
-  const key = await getEnclaveValue(`key_${cleanUsername}`);
   const cred = await getEnclaveValue(`cred_${cleanUsername}`);
-
-  if (!key || !cred) {
+  
+  if (!cred) {
     throw new Error("No stored credentials found for this node. Please login manually first.");
   }
 
-  // 1. Prompt for Biometric / Passkey Verification if WebAuthn is available
+  let decryptionKey: CryptoKey | null = null;
+
   if (window.PublicKeyCredential) {
     try {
       const challenge = window.crypto.getRandomValues(new Uint8Array(32));
       const credId = await getEnclaveValue(`webauthn_id_${cleanUsername}`);
       
       if (!credId) {
-        // If no hardware ID is registered, we notify the user that they need to setup biometrics.
         throw new Error("Hardware security not initialized. Please log in with your password and enable biometrics in Settings.");
       } else {
         const base64UrlToUint8Array = (base64Url: string) => {
@@ -191,50 +196,95 @@ export async function getWebBiometric(username: string): Promise<string> {
           }
           return outputArray;
         };
+        
+        let extensions: any = undefined;
+        if (cred.isPrf) {
+           const prfSalt = await getEnclaveValue(`prf_salt_${cleanUsername}`);
+           if (prfSalt) {
+             extensions = {
+               prf: {
+                 eval: {
+                   first: prfSalt
+                 }
+               }
+             };
+           }
+        }
 
-        const options: CredentialRequestOptions = {
+        const options: any = {
           publicKey: {
             challenge,
             rpId: window.location.hostname,
             userVerification: "required",
-            timeout: 60000,
+            timeout: 120000, // Increased timeout for slow hardware/external keys
             allowCredentials: [{
               id: base64UrlToUint8Array(credId),
               type: 'public-key'
-            }]
+            }],
+            extensions
           },
         };
 
-        const assertion = await navigator.credentials.get(options);
+        const assertion = await navigator.credentials.get(options) as any;
         
         if (!assertion) {
           throw new Error("Biometric signature refused by authenticator.");
         }
         console.log("[Enclave] Biometric signature verified via WebAuthn.");
+        
+        if (cred.isPrf) {
+           const extResults = assertion.getClientExtensionResults();
+           if (extResults.prf && extResults.prf.results && extResults.prf.results.first) {
+             const prfOutput = new Uint8Array(extResults.prf.results.first);
+             decryptionKey = await window.crypto.subtle.importKey(
+               "raw",
+               prfOutput,
+               { name: "AES-GCM" },
+               false,
+               ["encrypt", "decrypt"]
+             );
+           } else {
+             throw new Error("Authenticator did not return PRF evaluation. Hardware key bound decryption failed.");
+           }
+        }
       }
     } catch (authErr: any) {
-      // If user cancels or if hardware is disconnected, we abort
       const isCancellation = authErr.name === "NotAllowedError" || 
-                            authErr.name === "AbortError" ||
-                            authErr.message?.toLowerCase().includes("cancel");
+                             authErr.name === "AbortError" ||
+                             authErr.message?.toLowerCase().includes("cancel") ||
+                             authErr.message?.toLowerCase().includes("not allowed");
       
       if (isCancellation) {
+        if (authErr.message?.includes("iframe") || authErr.message?.includes("cross-origin")) {
+          throw new Error("Biometric verification is restricted inside preview frames. Please open the app in a new tab for native WebAuthn passkey verification.");
+        }
         throw new Error("Biometric verification cancelled.");
       }
       
-      // If no credentials found or other error, log but potentially allow fallback if IDB key is present
-      console.warn("Hardware security anchor fallback check:", authErr);
+      if (cred.isPrf) {
+         throw new Error("Hardware-bound PRF decryption failed: " + authErr.message);
+      } else {
+         throw new Error("Biometric signature failed: " + (authErr.message || "Authenticator rejected"));
+      }
     }
   }
 
-  // 2. Perform Decryption using the non-extractable key
+  if (!decryptionKey) {
+     if (cred.isPrf) {
+        throw new Error("Hardware-bound key could not be derived.");
+     }
+     decryptionKey = await getEnclaveValue(`key_${cleanUsername}`);
+     if (!decryptionKey) {
+        throw new Error("Sandbox key not found.");
+     }
+  }
+
   try {
     const decryptedBuffer = await window.crypto.subtle.decrypt(
       { name: "AES-GCM", iv: new Uint8Array(cred.iv) },
-      key,
+      decryptionKey,
       cred.ciphertext
     );
-
     const decoder = new TextDecoder();
     return decoder.decode(decryptedBuffer);
   } catch (decErr) {
@@ -242,12 +292,11 @@ export async function getWebBiometric(username: string): Promise<string> {
   }
 }
 
-/**
- * Removes biometric credentials from the local browser enclave.
- */
 export async function clearWebBiometric(username: string): Promise<void> {
   if (!isWebBiometricSupported()) return;
   const cleanUsername = username.trim().toLowerCase();
   await deleteEnclaveValue(`key_${cleanUsername}`).catch(() => {});
   await deleteEnclaveValue(`cred_${cleanUsername}`).catch(() => {});
+  await deleteEnclaveValue(`webauthn_id_${cleanUsername}`).catch(() => {});
+  await deleteEnclaveValue(`prf_salt_${cleanUsername}`).catch(() => {});
 }

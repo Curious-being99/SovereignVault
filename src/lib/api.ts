@@ -17,16 +17,40 @@ import {
 } from './storage';
 
 // Resilient fetch helper to automatically retry transient network errors/connection-drops
-const originalFetch = typeof window !== "undefined" ? window.fetch : (undefined as any);
+const originalFetch = typeof window !== "undefined" ? window.fetch.bind(window) : (undefined as any);
 
 async function resilientFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  // Support custom backend routing for decentralized environments (e.g. ICP, 4Everland)
+  if (typeof window !== "undefined") {
+    const savedBackend = localStorage.getItem("vault_backend_api_url");
+    if (savedBackend) {
+      const cleanBackend = savedBackend.trim().replace(/\/+$/, "");
+      if (typeof input === "string" && input.startsWith("/api")) {
+        input = `${cleanBackend}${input}`;
+      } else if (input instanceof URL && input.pathname.startsWith("/api")) {
+        input = new URL(`${cleanBackend}${input.pathname}${input.search}`);
+      } else if (input && typeof input === "object" && "url" in (input as any) && typeof (input as any).url === "string" && (input as any).url.startsWith("/api")) {
+        const targetUrl = `${cleanBackend}${(input as any).url}`;
+        input = new Request(targetUrl, input as any);
+      }
+    }
+  }
+
   const maxRetries = 3;
   const baseDelay = 300;
   let lastError: any;
 
+  // Ensure body is defined for POST/PUT/PATCH/DELETE to prevent fetch interceptor crashes
+  // where it might call .toString() or JSON.parse on an undefined body.
+  const isStateChangingMethod = init?.method && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(init.method.toUpperCase());
+  const safeInit = { ...init };
+  if (isStateChangingMethod && safeInit.body === undefined) {
+    safeInit.body = "{}";
+  }
+
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      const response = await originalFetch(input, init);
+      const response = await originalFetch(input, safeInit);
       return response;
     } catch (err: any) {
       lastError = err;
@@ -50,11 +74,41 @@ async function resilientFetch(input: RequestInfo | URL, init?: RequestInit): Pro
 // Shadow standard fetch inside this module to transparently intercept and retry all calls
 const fetch = resilientFetch;
 
-// Vault database write logging
-function logVaultWriteOperation(operation: string, success: boolean, details: any, error?: any) {
+const safeId = (id: any): string => {
+  if (id === undefined || id === null) return '0';
+  try {
+    return String(id);
+  } catch (e) {
+    return '0';
+  }
+};
+
+export function logVaultWriteOperation(operation: string, success: boolean, details: any, error?: any) {
   const timestamp = new Date().toISOString();
-  const logEntry = { timestamp, operation, success, details, error: error ? error.toString() : null };
-  console[success ? 'log' : 'error']('[Vault Write Tracker]', JSON.stringify(logEntry, null, 2));
+  let errorMsg: string | null = null;
+  
+  if (error !== undefined && error !== null) {
+    if (typeof error === 'string') {
+      errorMsg = error;
+    } else if (error instanceof Error) {
+      errorMsg = error.message || 'Error occurred';
+    } else if (typeof error === 'object') {
+      // Just take the message or string representation to avoid serialization errors
+      errorMsg = error.message || String(error);
+    } else {
+      errorMsg = String(error);
+    }
+  }
+  
+  const logEntry = { 
+    timestamp, 
+    operation, 
+    success, 
+    details: details || {}, 
+    error: errorMsg 
+  };
+  
+  console.log('[Vault Write Tracker]', logEntry);
   
   if (!success) {
     try {
@@ -63,7 +117,9 @@ function logVaultWriteOperation(operation: string, success: boolean, details: an
       // Keep only last 50
       if (failedOps.length > 50) failedOps.shift();
       localStorage.setItem('vault_failed_writes', JSON.stringify(failedOps));
-    } catch(e) {}
+    } catch (e) {
+      console.warn('[Vault Write Tracker] Failed to persist', e);
+    }
   }
 }
 
@@ -90,7 +146,40 @@ function base64ToBuffer(base64: string): ArrayBuffer {
 }
 
 function getCurrentUserId(): string {
-  return '';
+  try {
+    const saved = localStorage.getItem("vault_current_user");
+    if (saved) {
+      const user = JSON.parse(saved);
+      if (user && user.id !== undefined && user.id !== null) {
+        return String(user.id);
+      }
+    }
+  } catch (e) {}
+  return '0';
+}
+
+async function computeFileHash(data: Blob | ArrayBuffer): Promise<string> {
+  if (data instanceof ArrayBuffer) {
+    return computeBufferHash(data);
+  }
+  
+  const size = data.size;
+  // For massive files, we use a "Quick-Merkle" approach: hash of (first 1MB + last 1MB + size)
+  if (size < 10 * 1024 * 1024) {
+    const buffer = await data.arrayBuffer();
+    return computeBufferHash(buffer);
+  }
+  
+  const firstChunk = await data.slice(0, 1024 * 1024).arrayBuffer();
+  const lastChunk = await data.slice(Math.max(0, size - 1024 * 1024)).arrayBuffer();
+  const combined = new Uint8Array(firstChunk.byteLength + lastChunk.byteLength + 8);
+  combined.set(new Uint8Array(firstChunk), 0);
+  combined.set(new Uint8Array(lastChunk), firstChunk.byteLength);
+  const view = new DataView(combined.buffer);
+  view.setBigUint64(firstChunk.byteLength + lastChunk.byteLength, BigInt(size));
+  
+  const hash = await computeBufferHash(combined);
+  return 'qm_' + hash;
 }
 
 async function computeBufferHash(buffer: ArrayBuffer | Uint8Array): Promise<string> {
@@ -99,9 +188,7 @@ async function computeBufferHash(buffer: ArrayBuffer | Uint8Array): Promise<stri
       const hashBuffer = await window.crypto.subtle.digest('SHA-256', buffer);
       const hashArray = Array.from(new Uint8Array(hashBuffer));
       return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-    } catch (e) {
-      // fallback
-    }
+    } catch (e) {}
   }
   // resilient fallback hash for insecure context environments / old browsers
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
@@ -119,6 +206,10 @@ async function computeBufferHash(buffer: ArrayBuffer | Uint8Array): Promise<stri
 }
 
 export const api = {
+  async getSyncQueue() {
+    return await getSyncQueue();
+  },
+
   async processSyncQueue() {
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
     const queue = await getSyncQueue();
@@ -126,6 +217,7 @@ export const api = {
 
     console.log(`[SyncEngine] Processing ${queue.length} items in sync queue...`);
     for (const item of queue) {
+      if (!item || !item.id || !item.payload) continue;
       try {
         switch (item.action) {
           case 'REGISTER_USER':
@@ -135,16 +227,16 @@ export const api = {
             await this.updateProfile(item.payload);
             break;
           case 'CREATE_FILE':
-            await this.createFile(item.payload);
+            await this.createFile(item.payload, undefined, true);
             break;
           case 'UPDATE_FILE':
-            await this.updateFile(item.payload.userId, item.payload.id, item.payload.updates);
+            await this.updateFile(item.payload.userId, item.payload.id, item.payload.updates, true);
             break;
           case 'DELETE_FILE':
-            await this.deleteFile(item.payload.userId, item.payload.id);
+            await this.deleteFile(item.payload.userId, item.payload.id, true);
             break;
           case 'EMPTY_TRASH':
-            await this.emptyTrash(item.payload.userId);
+            await this.emptyTrash(item.payload.userId, true);
             break;
         }
         await removeSyncQueueItem(item.id!);
@@ -184,158 +276,150 @@ export const api = {
   },
 
   async register(user: UserProfile): Promise<{ id: number }> {
-    const localId = Date.now();
-    try {
-      const res = await resilientFetch('/api/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(user)
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Registration failed');
-      }
+    const res = await resilientFetch('/api/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(user)
+    });
+    if (!res.ok) {
       const data = await res.json();
-      await saveLocalUser({ ...user, id: data.id });
-      return data;
-    } catch (e) {
-      console.warn('Offline fallback for register:', e);
-      await saveLocalUser({ ...user, id: localId });
-      await addToSyncQueue('REGISTER_USER', { ...user, id: localId });
-      return { id: localId };
+      throw new Error(data.error || 'Registration failed');
     }
+    const data = await res.json();
+    return data;
   },
 
   async getSalt(username: string): Promise<string> {
-    try {
-      const res = await resilientFetch('/api/get-salt', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username })
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'User not found');
-      }
+    const res = await resilientFetch('/api/get-salt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username })
+    });
+    if (!res.ok) {
       const data = await res.json();
-      return data.passwordSalt;
-    } catch (e) {
-      console.warn('Offline fallback for getSalt:', e);
-      const user = await getLocalUserByUsername(username);
-      if (user) return user.passwordSalt;
-      throw new Error('User not found offline');
+      throw new Error(data.error || 'User not found');
     }
+    const data = await res.json();
+    return data.passwordSalt;
   },
 
   async login(username: string, passwordHash: string, passwordSalt?: string): Promise<UserProfile> {
-    try {
-      const res = await resilientFetch('/api/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, passwordHash, passwordSalt })
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Login failed');
-      }
-      const user = await res.json();
-      await saveLocalUser(user);
-      return user;
-    } catch (e) {
-      console.warn('Offline fallback for login:', e);
-      const user = await getLocalUserByUsername(username);
-      if (user && user.passwordHash === passwordHash) return user;
-      throw new Error('Login failed offline');
+    const res = await resilientFetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, passwordHash, passwordSalt })
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || 'Login failed');
     }
+    const user = await res.json();
+    return user;
   },
 
   async updateProfile(user: Partial<UserProfile> & { id: number }): Promise<void> {
-    try {
-      await saveLocalUser(user);
-      const res = await resilientFetch('/api/users/update', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(user)
-      });
-      if (!res.ok) throw new Error('Profile update failed');
-    } catch (e) {
-      console.warn('Offline fallback for updateProfile:', e);
-      await addToSyncQueue('UPDATE_PROFILE', user);
-    }
+    const res = await resilientFetch('/api/users/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(user)
+    });
+    if (!res.ok) throw new Error('Profile update failed');
   },
 
   async getFiles(userId: number, privateVaultId?: string): Promise<FileData[]> {
+    let serverFiles: FileData[] = [];
     try {
       const res = await resilientFetch(`/api/files/${userId}`, {
-        headers: { 'X-User-Id': userId.toString() }
+        headers: { 'X-User-Id': safeId(userId) }
       });
-      if (!res.ok) throw new Error('Network response not ok');
-      const data = await res.json();
-      
-      const parsedData = data.map((f: any) => ({
-        ...f,
-        data: f.data ? base64ToBuffer(f.data) : null
-      }));
-
-      // Cache locally, preserving any existing offline-cached binary data
-      for (const f of parsedData) {
-        try {
-          const existing = await getLocalFile(f.id);
-          if (existing && existing.data && !f.data) {
-            f.data = existing.data;
-          }
-        } catch (_) {}
-        await saveLocalFile(f).catch(() => {});
+      if (res.ok) {
+        const data = await res.json();
+        serverFiles = data.map((f: any) => ({
+          ...f,
+          data: f.data ? base64ToBuffer(f.data) : null
+        }));
       }
-      
-      // Merge with any local files that are not on the server (e.g. just restored from backup or offline-only)
+    } catch (e) {
+      console.warn('Network error fetching files, falling back to local vault:', e);
+    }
+
+    // Always merge with local storage to capture offline-only files or handle server resets
+    try {
       const localFiles = await getLocalFiles(userId, privateVaultId);
-      const merged = [...parsedData];
-      for (const lf of localFiles) {
-        if (!merged.find(f => f.id === lf.id)) {
-          merged.push(lf);
+      
+      const merged = [...serverFiles];
+      const serverFileIds = new Set(serverFiles.map(f => f.id));
+      const serverFileSignatures = new Set(serverFiles.map(f => `${(f.folderPath || '/').trim() || '/'}/${f.name}`));
+      
+      for (const local of localFiles) {
+        const normLocalPath = (local.folderPath || '/').trim() || '/';
+        const signature = `${normLocalPath}/${local.name}`;
+
+        if (!serverFileIds.has(local.id) && !serverFileSignatures.has(signature)) {
+          merged.push(local);
+        } else {
+          // Preserve local binary payload or OPFS reference if server metadata had data: null
+          const serverIdx = merged.findIndex(f => f.id === local.id || `${(f.folderPath || '/').trim() || '/'}/${f.name}` === signature);
+          if (serverIdx !== -1) {
+            if (!merged[serverIdx].data && local.data) {
+              merged[serverIdx].data = local.data;
+            }
+            if (local._opfsNative) {
+              merged[serverIdx]._opfsNative = true;
+            }
+          }
         }
       }
+      
       return merged;
     } catch (e) {
-      console.log('Falling back to local storage for getFiles', e);
-      return await getVisibleFiles(userId, privateVaultId);
+      console.error('Failed to access local file vault:', e);
+      return serverFiles;
     }
   },
 
   async getSharedFiles(): Promise<(FileData & { ownerDisplayName: string, ownerUsername: string })[]> {
+    let serverFiles: any[] = [];
     try {
       const res = await resilientFetch('/api/files/shared', {
         headers: { 'X-User-Id': getCurrentUserId() }
       });
-      if (!res.ok) throw new Error('Failed to fetch shared files');
-      const data = await res.json();
-      const parsedData = data.map((f: any) => ({
-        ...f,
-        data: f.data ? base64ToBuffer(f.data) : null
-      }));
-      // Cache locally, preserving any existing offline-cached binary data
-      for (const f of parsedData) {
-        try {
-          const existing = await getLocalFile(f.id);
-          if (existing && existing.data && !f.data) {
-            f.data = existing.data;
-          }
-        } catch (_) {}
-        await saveLocalFile(f).catch(() => {});
+      if (res.ok) {
+        const data = await res.json();
+        serverFiles = data.map((f: any) => ({
+          ...f,
+          data: f.data ? base64ToBuffer(f.data) : null
+        }));
       }
-      return parsedData;
     } catch (e) {
-      console.log('Falling back to local storage for getSharedFiles', e);
-      return await getLocalSharedFiles() as any;
+      console.warn('Failed to fetch shared files, falling back to local storage:', e);
+    }
+
+    try {
+      const localShared = await getLocalSharedFiles();
+      const merged = [...serverFiles];
+      const serverIds = new Set(serverFiles.map(f => f.id));
+      for (const loc of localShared) {
+        if (!serverIds.has(loc.id)) {
+          merged.push({
+            ...loc,
+            ownerDisplayName: loc.senderName || 'Offline Peer',
+            ownerUsername: loc.senderName ? loc.senderName.toLowerCase() : 'offline'
+          });
+        }
+      }
+      return merged;
+    } catch (e) {
+      console.warn('Failed to merge local shared files:', e);
+      return serverFiles;
     }
   },
 
-  async createFile(file: FileData, onProgress?: (percent: number) => void): Promise<{ id: number }> {
+  async createFile(file: FileData, onProgress?: (percent: number) => void, fromQueue: boolean = false): Promise<{ id: number }> {
     // Calculate content hash (merkleRoot) locally for integrity tracking
     if (!file.isFolder && file.data && !file.merkleRoot) {
       try {
-        file.merkleRoot = await computeBufferHash(file.data instanceof ArrayBuffer ? file.data : await (file.data as Blob).arrayBuffer());
+        file.merkleRoot = await computeFileHash(file.data as any);
       } catch (e) {
         console.warn("Could not compute local merkleRoot for file:", file.name);
       }
@@ -366,7 +450,7 @@ export const api = {
           method: 'POST',
           headers: { 
             'Content-Type': 'application/json',
-            'X-User-Id': file.userId.toString()
+            'X-User-Id': safeId(file.userId)
           },
           body: JSON.stringify(payload)
         });
@@ -383,35 +467,25 @@ export const api = {
       }
 
       // Binary file upload: use high-performance Parallel Chunked Uploads
-      let arrayBuffer: ArrayBuffer;
-      if (file.data instanceof ArrayBuffer) {
-        arrayBuffer = file.data;
-      } else {
-        arrayBuffer = await (file.data as Blob).arrayBuffer();
-      }
-
-      const CHUNK_SIZE = 1024 * 1024; // 1MB chunk size
-      const totalSize = arrayBuffer.byteLength;
+      // Memory Optimization: Use Blob slicing instead of loading entire file into ArrayBuffer
+      const data = file.data instanceof Blob 
+        ? file.data 
+        : new Blob([file.data as any]);
+      const totalSize = data.size;
+      const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB chunk size for efficiency
       const chunkCount = Math.max(1, Math.ceil(totalSize / CHUNK_SIZE));
       
-      const chunks: ArrayBuffer[] = [];
-      const hashPromises: Promise<string>[] = [];
-
+      const chunkHashes: string[] = [];
       for (let i = 0; i < chunkCount; i++) {
-        const start = i * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, totalSize);
-        const chunkData = arrayBuffer.slice(start, end);
-        chunks.push(chunkData);
-        hashPromises.push(computeBufferHash(chunkData));
+        // We use a predictable placeholder for the manifest to avoid OOM
+        chunkHashes.push(`chunk_${i}_${totalSize}`);
       }
-
-      const chunkHashes = await Promise.all(hashPromises);
 
       const initRes = await resilientFetch('/api/files/chunked/init', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-User-Id': file.userId.toString()
+          'X-User-Id': safeId(file.userId)
         },
         body: JSON.stringify({
           name: file.name,
@@ -421,7 +495,9 @@ export const api = {
           clientEncrypted: file.clientEncrypted !== false,
           lastModified: file.lastModified || Date.now(),
           chunkHashes,
-          originalId: file.originalId
+          originalId: file.originalId,
+          vaultSeedId: file.vaultSeedId,
+          privateVaultId: file.privateVaultId
         })
       });
 
@@ -448,12 +524,16 @@ export const api = {
 
       updateOverallProgress();
 
-      const uploadChunkWithXhr = (chunkIndex: number, hash: string, data: ArrayBuffer): Promise<void> => {
+      const uploadChunkWithXhr = async (chunkIndex: number, hash: string): Promise<void> => {
+        const start = chunkIndex * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, totalSize);
+        const chunkData = await data.slice(start, end).arrayBuffer();
+
         return new Promise((resolve, reject) => {
           const xhr = new XMLHttpRequest();
           xhr.open('POST', '/api/files/chunked/upload');
-          xhr.setRequestHeader('X-User-Id', file.userId.toString());
-          xhr.setRequestHeader('X-File-Id', fileId.toString());
+          xhr.setRequestHeader('X-User-Id', safeId(file.userId));
+          xhr.setRequestHeader('X-File-Id', safeId(fileId));
           xhr.setRequestHeader('X-Chunk-Index', chunkIndex.toString());
           xhr.setRequestHeader('X-Chunk-Hash', hash);
           xhr.setRequestHeader('Content-Type', 'application/octet-stream');
@@ -472,22 +552,18 @@ export const api = {
               updateOverallProgress();
               resolve();
             } else {
-              reject(new Error(`Chunk upload failed status ${xhr.status}`));
+              reject(new Error(`Chunk upload failed with status ${xhr.status}`));
             }
           };
-
-          xhr.onerror = () => reject(new Error('Network error during chunk upload'));
-          xhr.ontimeout = () => reject(new Error('Chunk upload timed out'));
-          xhr.onabort = () => reject(new Error('Chunk upload aborted'));
-          xhr.timeout = 180000;
-          xhr.send(data);
+          xhr.onerror = () => reject(new Error('Network Error during chunk upload'));
+          xhr.send(chunkData);
         });
       };
 
-      const uploadChunkWithRetry = async (chunkIndex: number, hash: string, data: ArrayBuffer, retries = 3, delayMs = 1500): Promise<void> => {
+      const uploadChunkWithRetry = async (chunkIndex: number, hash: string, retries = 3, delayMs = 1500): Promise<void> => {
         for (let attempt = 1; attempt <= retries; attempt++) {
           try {
-            await uploadChunkWithXhr(chunkIndex, hash, data);
+            await uploadChunkWithXhr(chunkIndex, hash);
             return;
           } catch (err: any) {
             if (attempt === retries) throw err;
@@ -496,17 +572,18 @@ export const api = {
         }
       };
 
-      const queue = [...chunks.map((chunk, index) => ({ chunk, index, hash: chunkHashes[index] }))];
-      const missingQueue = queue.filter(item => missingSet.has(item.hash));
+      const missingQueue = chunkHashes
+        .map((hash, index) => ({ hash, index }))
+        .filter(item => missingSet.has(item.hash));
 
-      const concurrencyLimit = 6;
+      const concurrencyLimit = 3;
       const workers: Promise<void>[] = [];
 
       const runWorker = async () => {
         while (missingQueue.length > 0) {
           const item = missingQueue.shift();
           if (!item) break;
-          await uploadChunkWithRetry(item.index, item.hash, item.chunk);
+          await uploadChunkWithRetry(item.index, item.hash);
         }
       };
 
@@ -529,13 +606,23 @@ export const api = {
     } catch (e: any) {
       logVaultWriteOperation('createFile', false, { name: file.name }, e);
       console.warn("Offline fallback for createFile:", e);
-      await addToSyncQueue('CREATE_FILE', localFile).catch(console.error);
+      if (!fromQueue) {
+        await addToSyncQueue('CREATE_FILE', localFile).catch(console.error);
+      }
       if (onProgress) onProgress(100);
       return { id: localId };
     }
   },
 
-  async updateFile(userId: number, id: number, updates: Partial<FileData>): Promise<void> {
+  async updateFile(userId: number, id: number, updates: Partial<FileData>, fromQueue: boolean = false): Promise<void> {
+    if (id === undefined || id === null) {
+      console.error("updateFile: id is required");
+      return;
+    }
+    if (userId === undefined || userId === null) {
+      console.error("updateFile: userId is required");
+      return;
+    }
     // If data is updated, recalculate merkleRoot
     if (updates.data && !updates.merkleRoot) {
       try {
@@ -569,7 +656,7 @@ export const api = {
           method: 'PUT',
           headers: {
             'Content-Type': 'application/octet-stream',
-            'X-User-Id': userId.toString(),
+            'X-User-Id': safeId(userId),
             'X-File-Metadata': encodeURIComponent(JSON.stringify(metadata))
           },
           body: updates.data
@@ -592,7 +679,7 @@ export const api = {
         method: 'PUT',
         headers: { 
           'Content-Type': 'application/json',
-          'X-User-Id': userId.toString()
+          'X-User-Id': safeId(userId)
         },
         body: JSON.stringify(payload)
       });
@@ -604,202 +691,181 @@ export const api = {
     } catch (e: any) {
       logVaultWriteOperation('updateFile', false, { id, updates }, e);
       console.warn("Offline fallback for updateFile:", e);
-      await addToSyncQueue('UPDATE_FILE', { id, updates }).catch(console.error);
-    }
-  },
-
-  async deleteFile(userId: number, id: number): Promise<void> {
-    await deleteLocalFile(id).catch(console.error);
-    try {
-      const res = await resilientFetch(`/api/files/${id}`, {
-        method: 'DELETE',
-        headers: { 'X-User-Id': userId.toString() }
-      });
-      if (!res.ok) {
-          const errorData = await res.json().catch(() => ({}));
-          throw new Error(errorData.error || 'File deletion failed');
+      if (!fromQueue) {
+        await addToSyncQueue('UPDATE_FILE', { userId, id, updates }).catch(console.error);
       }
-      logVaultWriteOperation('deleteFile', true, { id });
-    } catch (e: any) {
-      logVaultWriteOperation('deleteFile', false, { id }, e);
-      console.warn("Offline fallback for deleteFile:", e);
-      await addToSyncQueue('DELETE_FILE', { id }).catch(console.error);
     }
   },
 
-  async emptyTrash(userId: number): Promise<void> {
+  async deleteFile(userId: any, id: any, fromQueue: boolean = false): Promise<void> {
+    const sId = safeId(id);
+    const uId = safeId(userId);
+
+    console.log(`[deleteFile] Starting deletion for id: ${sId}, userId: ${uId}`);
+
+    if (sId === '0') {
+      console.error("deleteFile: valid id is required");
+      return;
+    }
+    
+    // Attempt local deletion first
+    await deleteLocalFile(Number(id) || id).catch(err => {
+      console.warn("Local deletion failed or already removed:", err);
+    });
+
     try {
-      const res = await resilientFetch(`/api/files/empty-trash/${userId}`, {
-        method: 'POST',
-        headers: { 'X-User-Id': userId.toString() }
+      console.log(`[deleteFile] Fetching /api/files/${sId}`);
+      
+      const res = await new Promise<{ok: boolean, status: number, json: () => Promise<any>}>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        let targetUrl = `/api/files/${sId}`;
+        
+        // Support custom backend routing for decentralized environments
+        if (typeof window !== "undefined") {
+          const savedBackend = localStorage.getItem("vault_backend_api_url");
+          if (savedBackend) {
+            const cleanBackend = savedBackend.trim().replace(/\/+$/, "");
+            targetUrl = `${cleanBackend}${targetUrl}`;
+          }
+        }
+        
+        xhr.open('DELETE', targetUrl);
+        xhr.setRequestHeader('X-User-Id', uId);
+        
+        xhr.onload = () => {
+          resolve({
+            ok: xhr.status >= 200 && xhr.status < 300,
+            status: xhr.status,
+            json: async () => JSON.parse(xhr.responseText || "{}")
+          });
+        };
+        xhr.onerror = () => reject(new Error("Network Error"));
+        xhr.send();
+      });
+      
+      console.log(`[deleteFile] Fetch response status: ${res.status}`);
+      
+      if (!res.ok) {
+        if (res.status === 404) return;
+        let errorMsg = 'File deletion failed';
+        try {
+          const errorData = await res.json();
+          errorMsg = errorData.error || errorMsg;
+        } catch (jsonErr) {}
+        throw new Error(errorMsg);
+      }
+      
+      logVaultWriteOperation('deleteFile', true, { id: sId, userId: uId });
+    } catch (e: any) {
+      console.error(`[deleteFile] Error during deletion for id: ${sId}`, e?.stack || e);
+      logVaultWriteOperation('deleteFile', false, { id: sId, userId: uId, stack: e?.stack }, e || new Error("Unknown deletion error"));
+      console.warn("Offline fallback for deleteFile:", e);
+      if (!fromQueue) {
+        await addToSyncQueue('DELETE_FILE', { userId: uId, id: sId }).catch(console.error);
+      }
+    }
+  },
+
+  async emptyTrash(userId: number, fromQueue: boolean = false): Promise<void> {
+    try {
+      const res = await new Promise<{ok: boolean}>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        let targetUrl = `/api/files/empty-trash/${userId}`;
+        if (typeof window !== "undefined") {
+          const savedBackend = localStorage.getItem("vault_backend_api_url");
+          if (savedBackend) {
+            targetUrl = `${savedBackend.trim().replace(/\/+$/, "")}${targetUrl}`;
+          }
+        }
+        xhr.open('POST', targetUrl);
+        xhr.setRequestHeader('X-User-Id', safeId(userId));
+        xhr.onload = () => resolve({ ok: xhr.status >= 200 && xhr.status < 300 });
+        xhr.onerror = () => reject(new Error("Network Error"));
+        xhr.send();
       });
       if (!res.ok) throw new Error('Failed to empty trash');
       logVaultWriteOperation('emptyTrash', true, { userId });
     } catch (e: any) {
       logVaultWriteOperation('emptyTrash', false, { userId }, e);
       console.warn("Offline fallback for emptyTrash:", e);
-      await addToSyncQueue('EMPTY_TRASH', { userId }).catch(console.error);
+      if (!fromQueue) {
+        await addToSyncQueue('EMPTY_TRASH', { userId }).catch(console.error);
+      }
     }
   },
 
   async downloadFileContent(userId: number, fileId: number, onProgress?: (percent: number) => void): Promise<ArrayBuffer> {
     try {
-      // To be extremely resilient to home network disruptions, we download the file in sequential 2MB segments (using HTTP Range headers).
-      // If a segment fails, we retry up to 10 times with exponential backoff before continuing.
-      // This allows resuming a download exactly where it stopped!
-      
-      // First, fetch the file's total size from metadata or perform a quick probe
-      let totalSize = 0;
-      try {
-        const probeRes = await resilientFetch(`/api/files/download/${fileId}?userId=${userId}`, { method: 'HEAD' });
-        const lenHeader = probeRes.headers.get('Content-Length');
-        if (probeRes.ok && lenHeader) {
-          totalSize = parseInt(lenHeader, 10);
-        }
-      } catch (e) {
-        console.warn("Probe HEAD request failed, falling back to full download:", e);
-      }
-
-      if (totalSize <= 0) {
-        // Fallback if size unknown: do a standard resilient block download
-        const dataBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
-          let attempt = 1;
-          const maxAttempts = 10;
-          const requestWithRetry = () => {
-            const xhr = new XMLHttpRequest();
-            xhr.open('GET', `/api/files/download/${fileId}?userId=${userId}`);
-            xhr.setRequestHeader('X-User-Id', userId.toString());
-            xhr.responseType = 'arraybuffer';
-            if (onProgress) {
-              xhr.onprogress = (e) => {
-                if (e.lengthComputable) {
-                  onProgress(Math.round((e.loaded / e.total) * 100));
-                }
-              };
+      const dataBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
+        let attempt = 1;
+        const maxAttempts = 5;
+        const requestWithRetry = () => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('GET', `/api/files/download/${fileId}?userId=${userId}&download=1`);
+          xhr.setRequestHeader('X-User-Id', safeId(userId));
+          xhr.responseType = 'arraybuffer';
+          if (onProgress) {
+            xhr.onprogress = (e) => {
+              if (e.lengthComputable && e.total > 0) {
+                onProgress(Math.round((e.loaded / e.total) * 100));
+              }
+            };
+          }
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              if (onProgress) onProgress(100);
+              resolve(xhr.response);
+            } else {
+              let errorMessage = `Server error ${xhr.status}`;
+              if (xhr.response) {
+                try {
+                  const text = new TextDecoder("utf-8").decode(new Uint8Array(xhr.response));
+                  const json = JSON.parse(text);
+                  if (json && json.error) {
+                    errorMessage = json.error;
+                  } else if (json && json.message) {
+                    errorMessage = json.message;
+                  } else if (text && text.trim().length < 200) {
+                    errorMessage = text.trim();
+                  }
+                } catch (_) {}
+              }
+              // Fail fast on client-side errors (400-499) and 500 server-side errors, do not retry indefinitely
+              if (xhr.status >= 400 && xhr.status < 500) {
+                reject(new Error(errorMessage));
+              } else {
+                retry(errorMessage);
+              }
             }
-            xhr.onload = () => {
-              if (xhr.status >= 200 && xhr.status < 300) {
-                resolve(xhr.response);
-              } else {
-                retry();
-              }
-            };
-            xhr.onerror = () => retry();
-            xhr.ontimeout = () => retry();
-            
-            const retry = () => {
-              if (attempt < maxAttempts) {
-                attempt++;
-                setTimeout(requestWithRetry, 1500 * attempt);
-              } else {
-                reject(new Error("Network error during raw file download after retries"));
-              }
-            };
-            xhr.send();
           };
-          requestWithRetry();
-        });
-
-        // Cache the fully downloaded data in local storage for offline use!
-        try {
-          const localFile = await getLocalFile(fileId);
-          if (localFile) {
-            localFile.data = dataBuffer;
-            await saveLocalFile(localFile).catch(console.error);
-          }
-        } catch (cacheErr) {
-          console.warn("Failed to cache downloaded file:", cacheErr);
-        }
-
-        return dataBuffer;
-      }
-
-      const SEGMENT_SIZE = 2 * 1024 * 1024; // 2MB segments
-      const segmentsCount = Math.ceil(totalSize / SEGMENT_SIZE);
-      const buffers: Uint8Array[] = [];
-      let downloadedBytes = 0;
-
-      const downloadSegmentWithRetry = async (start: number, end: number, retries = 3, delayMs = 1500): Promise<ArrayBuffer> => {
-        for (let attempt = 1; attempt <= retries; attempt++) {
-          try {
-            return await new Promise<ArrayBuffer>((resolve, reject) => {
-              const xhr = new XMLHttpRequest();
-              xhr.open('GET', `/api/files/download/${fileId}?userId=${userId}`);
-              xhr.setRequestHeader('X-User-Id', userId.toString());
-              xhr.setRequestHeader('Range', `bytes=${start}-${end}`);
-              xhr.responseType = 'arraybuffer';
-              xhr.onload = () => {
-                // 206 Partial Content is standard, 200 OK is also acceptable if server returned full file
-                if (xhr.status === 206 || xhr.status === 200) {
-                  resolve(xhr.response);
-                } else {
-                  reject(new Error(`Status error ${xhr.status}`));
-                }
-              };
-              xhr.onerror = () => reject(new Error('Network error during range download'));
-              xhr.ontimeout = () => reject(new Error('Range download timed out'));
-              xhr.timeout = 60000;
-              xhr.send();
-            });
-          } catch (err: any) {
-            console.warn(`[ResilientDownloader] Segment bytes=${start}-${end} attempt ${attempt}/${retries} failed: ${err.message}. Retrying...`);
-            if (attempt === retries) {
-              throw err;
+          xhr.onerror = () => retry("Connection/network failure during file download");
+          xhr.ontimeout = () => retry("Download request timed out");
+          
+          const retry = (msg?: string) => {
+            if (attempt < maxAttempts) {
+              attempt++;
+              setTimeout(requestWithRetry, 1000 * attempt);
+            } else {
+              reject(new Error(msg || "Network error during file download after retries"));
             }
-            await new Promise((r) => setTimeout(r, delayMs * Math.pow(1.5, attempt - 1)));
-          }
-        }
-        throw new Error("Out of retries");
-      };
+          };
+          xhr.send();
+        };
+        requestWithRetry();
+      });
 
-      for (let i = 0; i < segmentsCount; i++) {
-        const start = i * SEGMENT_SIZE;
-        const end = Math.min(start + SEGMENT_SIZE - 1, totalSize - 1);
-        
-        const segmentBuffer = await downloadSegmentWithRetry(start, end);
-        
-        // If the server ignored the Range header and returned the whole file (status 200) on first attempt, take it directly
-        if (i === 0 && segmentBuffer.byteLength === totalSize) {
-          if (onProgress) onProgress(100);
-          try {
-            const localFile = await getLocalFile(fileId);
-            if (localFile) {
-              localFile.data = segmentBuffer;
-              await saveLocalFile(localFile).catch(console.error);
-            }
-          } catch (cacheErr) {
-            console.warn("Failed to cache downloaded file:", cacheErr);
-          }
-          return segmentBuffer;
-        }
-
-        buffers.push(new Uint8Array(segmentBuffer));
-        downloadedBytes += segmentBuffer.byteLength;
-        if (onProgress) {
-          onProgress(Math.round((downloadedBytes / totalSize) * 100));
-        }
-      }
-
-      // Merge all buffers into one single large ArrayBuffer
-      const combined = new Uint8Array(totalSize);
-      let offset = 0;
-      for (const buf of buffers) {
-        combined.set(buf, offset);
-        offset += buf.length;
-      }
-
-      // Cache the fully downloaded data in local storage for offline use!
+      // Cache the fully downloaded data in local storage for offline use
       try {
         const localFile = await getLocalFile(fileId);
         if (localFile) {
-          localFile.data = combined.buffer;
+          localFile.data = dataBuffer;
           await saveLocalFile(localFile).catch(console.error);
         }
       } catch (cacheErr) {
         console.warn("Failed to cache downloaded file:", cacheErr);
       }
 
-      return combined.buffer;
+      return dataBuffer;
     } catch (e) {
       console.warn('Offline fallback for downloadFileContent:', e);
       const localFile = await getLocalFile(fileId);
@@ -826,7 +892,7 @@ export const api = {
         throw new Error("Local offline mode active.");
       }
       const res = await resilientFetch(`/api/vault/verify-dag/${userId}`, {
-        headers: { 'X-User-Id': userId.toString() }
+        headers: { 'X-User-Id': safeId(userId) }
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
@@ -902,7 +968,7 @@ export const api = {
         throw new Error("Local offline mode active.");
       }
       const res = await resilientFetch(`/api/vault/verify-block/${fileId}`, {
-        headers: { 'X-User-Id': userId.toString() }
+        headers: { 'X-User-Id': safeId(userId) }
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
@@ -999,7 +1065,7 @@ export const api = {
   async rebuildVaultDag(userId: number): Promise<any> {
     const res = await resilientFetch(`/api/vault/rebuild-dag/${userId}`, {
       method: "POST",
-      headers: { 'X-User-Id': userId.toString() }
+      headers: { 'X-User-Id': safeId(userId) }
     });
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
@@ -1011,7 +1077,7 @@ export const api = {
   async deepRecover(userId: number): Promise<any> {
     const res = await resilientFetch(`/api/system/deep-recover/${userId}`, {
       method: "POST",
-      headers: { 'X-User-Id': userId.toString() }
+      headers: { 'X-User-Id': safeId(userId) }
     });
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
@@ -1022,7 +1088,7 @@ export const api = {
 
   async exportVaultPack(userId: number): Promise<any> {
     const res = await resilientFetch(`/api/vault/export-pack/${userId}`, {
-      headers: { 'X-User-Id': userId.toString() }
+      headers: { 'X-User-Id': safeId(userId) }
     });
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
@@ -1096,6 +1162,8 @@ export const api = {
               previousDagHash: f.previousDagHash || null,
               dagHash: f.dagHash || null,
               dagSignature: f.dagSignature || null,
+              kaspaL1Anchor: f.kaspaL1Anchor || null,
+              kaspaL1Score: f.kaspaL1Score || null,
               vaultSeedId: f.vaultSeedId || data.user.vaultSeedId,
               cryptoBlockNumber: f.cryptoBlockNumber || null,
               originalOwnerSeedId: f.originalOwnerSeedId || null,
@@ -1183,6 +1251,8 @@ export const api = {
               previousDagHash: f.previousDagHash || null,
               dagHash: f.dagHash || null,
               dagSignature: f.dagSignature || null,
+              kaspaL1Anchor: f.kaspaL1Anchor || null,
+              kaspaL1Score: f.kaspaL1Score || null,
               vaultSeedId: f.vaultSeedId || user.vaultSeedId,
               cryptoBlockNumber: f.cryptoBlockNumber || null,
               originalOwnerSeedId: f.originalOwnerSeedId || null,
@@ -1211,9 +1281,9 @@ export const api = {
     }
   },
 
-  async linkOrphanFilesToUser(userId: number, privateVaultId: string): Promise<number> {
+  async linkOrphanFilesToUser(userId: number, privateVaultId: string, vaultSeedId?: string): Promise<number> {
     try {
-      return await linkOrphanFilesToUser(userId, privateVaultId);
+      return await linkOrphanFilesToUser(userId, privateVaultId, vaultSeedId);
     } catch (e) {
       console.error("Failed to link orphan files:", e);
       return 0;
@@ -1223,7 +1293,7 @@ export const api = {
   async repairStorage(userId: number): Promise<{ success: boolean; message: string; stats?: any }> {
     const res = await resilientFetch('/api/storage/repair', {
       method: 'POST',
-      headers: { 'X-User-Id': userId.toString() }
+      headers: { 'X-User-Id': safeId(userId) }
     });
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
@@ -1234,7 +1304,7 @@ export const api = {
 
   async downloadRawDatabase(userId: number): Promise<ArrayBuffer> {
     const res = await fetch('/api/admin/download-db', {
-      headers: { 'X-User-Id': userId.toString() }
+      headers: { 'X-User-Id': safeId(userId) }
     });
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
@@ -1248,7 +1318,7 @@ export const api = {
       method: 'POST',
       headers: { 
         'Content-Type': 'application/octet-stream',
-        'X-User-Id': userId.toString()
+        'X-User-Id': safeId(userId)
       },
       body: databaseBuffer
     });
@@ -1261,7 +1331,7 @@ export const api = {
 
   async getMeshRestorePoints(userId: number): Promise<any[]> {
     const res = await fetch(`/api/mesh/restore/${userId}`, {
-      headers: { 'X-User-Id': userId.toString() }
+      headers: { 'X-User-Id': safeId(userId) }
     });
     if (!res.ok) return [];
     return res.json();

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { 
   Shield, 
@@ -19,11 +19,16 @@ import {
   AlertTriangle,
   RotateCcw,
   Download,
+  Key,
   Fingerprint,
   ShieldAlert,
-  X
+  ShieldCheck,
+  X,
+  Github,
+  Link as LinkIcon
 } from "lucide-react";
 import { UserProfile } from "../lib/db";
+import { SovereignRecovery } from "./SovereignRecovery";
 
 interface LandingPageProps {
   usernameInput: string;
@@ -41,7 +46,8 @@ interface LandingPageProps {
   handleVaultPackImport: (e: any, directText?: string) => void;
   handleMnemonicOrMasterKeyRecovery?: (username: string, mnemonicOrKey: string, pinOrPass: string) => Promise<void>;
   hasBiometric?: boolean;
-  handleBiometricSign?: () => void;
+  handleBiometricSign?: (username?: string) => void;
+  onLinkBackend?: () => void;
 }
 
 export const LandingPage: React.FC<LandingPageProps> = ({
@@ -61,16 +67,40 @@ export const LandingPage: React.FC<LandingPageProps> = ({
   handleMnemonicOrMasterKeyRecovery,
   hasBiometric,
   handleBiometricSign,
+  onLinkBackend,
 }) => {
   const [authMode, setAuthMode] = useState<"landing" | "register" | "login">("landing");
   const [isDraggingImport, setIsDraggingImport] = useState(false);
   const [showRecoveryDesk, setShowRecoveryDesk] = useState(false);
-  const [recoveryTab, setRecoveryTab] = useState<"upload" | "paste" | "seed">("upload");
+  const [recoveryTab, setRecoveryTab] = useState<"upload" | "paste" | "seed" | "sovereign">("upload");
   const [pastedPackText, setPastedPackText] = useState("");
   const [recoverUsername, setRecoverUsername] = useState("");
   const [recoverMnemonic, setRecoverMnemonic] = useState("");
   const [recoverPin, setRecoverPin] = useState("");
   const [isProcessingRecovery, setIsProcessingRecovery] = useState(false);
+
+  const hasAutoChallengedRef = useRef(false);
+
+  // Auto-login biometric trigger on authMode change to login
+  useEffect(() => {
+    if (authMode !== "login") {
+      hasAutoChallengedRef.current = false;
+    } else if (authMode === "login" && !hasAutoChallengedRef.current && handleBiometricSign) {
+      let targetUser = usernameInput;
+      if (!targetUser && allUsers.length > 0) {
+        targetUser = allUsers[0].username;
+        setUsernameInput(targetUser);
+      }
+      
+      if (targetUser) {
+        hasAutoChallengedRef.current = true;
+        const timer = setTimeout(() => {
+          handleBiometricSign(targetUser);
+        }, 600);
+        return () => clearTimeout(timer);
+      }
+    }
+  }, [authMode, handleBiometricSign, allUsers, usernameInput, setUsernameInput]);
 
   const onDragOverImport = (e: React.DragEvent) => {
     e.preventDefault();
@@ -99,7 +129,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
       onDragOver={onDragOverImport}
       onDragLeave={onDragLeaveImport}
       onDrop={onDropImport}
-      className={`relative w-full flex flex-col flex-1 bg-slate-950 text-slate-200 selection:bg-indigo-500/30 transition-colors duration-300 ${isDraggingImport ? 'bg-indigo-950/40' : ''} ${authMode !== 'landing' ? 'fixed inset-0 overflow-hidden z-[100]' : ''}`}
+      className={`relative w-full flex flex-col flex-1 bg-slate-950 text-slate-200 selection:bg-indigo-500/30 transition-colors duration-300 ${isDraggingImport ? 'bg-indigo-950/40' : ''} ${authMode !== 'landing' ? 'fixed inset-0 overflow-y-auto z-[100] bg-slate-950 flex flex-col items-center justify-start' : ''}`}
     >
       <AnimatePresence>
         {isDraggingImport && (
@@ -164,7 +194,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.5 }}
-              className="flex flex-col sm:flex-row gap-4 sm:gap-6 w-full sm:w-auto px-4 sm:px-0"
+              className="flex flex-col sm:flex-row gap-4 sm:gap-6 w-full sm:w-auto px-4 sm:px-0 mb-8"
             >
               <button
                 onClick={() => setAuthMode("register")}
@@ -178,6 +208,23 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               >
                 Unlock Vault
               </button>
+            </motion.div>
+
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.6 }}
+              className="flex flex-col sm:flex-row items-center gap-4 sm:gap-6 w-full sm:w-auto px-4 sm:px-0"
+            >
+              <a
+                href="https://github.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors text-xs font-black uppercase tracking-widest px-4 py-2 bg-slate-900/50 border border-slate-800 rounded-xl hover:bg-slate-800"
+              >
+                <Github className="w-4 h-4" />
+                Source on GitHub
+              </a>
             </motion.div>
 
             <motion.div
@@ -216,6 +263,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                       badge: "KASPA-SEC",
                       title: "Kaspa Encryption Anchors",
                       desc: "Cryptographic state and vault identities are immutably anchored to the Kaspa BlockDAG."
+                    },
+                    {
+                      badge: "PRIVACY",
+                      title: "Privacy by Design",
+                      desc: "No single peer holds a complete set of shards, and all shards are encrypted with client-side keys before transmission, rendering the data mathematically unreadable to everyone else."
                     }
                   ]
                 },
@@ -650,9 +702,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             initial={{ opacity: 0, scale: 0.98 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 1.02 }}
-            className="flex-1 flex flex-col items-center justify-center p-0 sm:p-6 overflow-y-auto"
+            className="w-full flex-1 flex flex-col items-center justify-center p-4 sm:p-8 min-h-screen"
           >
-            <div className="w-full max-w-lg h-full sm:h-auto flex flex-col">
+            <div className="w-full max-w-lg h-auto flex flex-col py-10 sm:py-0">
               <button
                 onClick={() => setAuthMode("landing")}
                 className="group mb-8 flex items-center gap-2 text-slate-500 hover:text-white transition-colors text-xs font-black uppercase tracking-widest"
@@ -661,7 +713,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                 Back to overview
               </button>
 
-              <div className="flex-1 sm:flex-none bg-slate-900/50 backdrop-blur-3xl border-0 sm:border border-slate-800 pt-16 p-6 sm:p-10 rounded-none sm:rounded-[40px] shadow-none sm:shadow-2xl flex flex-col justify-center">
+              <div className="flex-1 sm:flex-none bg-slate-900/80 backdrop-blur-md border-0 sm:border border-slate-800 pt-16 p-6 sm:p-10 rounded-none sm:rounded-[40px] shadow-none sm:shadow-2xl flex flex-col">
                 <div className="mb-8 sm:mb-10 text-center">
                   <h2 className="text-xl sm:text-3xl font-black text-white mb-1.5 sm:mb-2 uppercase tracking-tighter">
                     {authMode === "register" ? "New Sovereign" : "Unlock Vault"}
@@ -678,6 +730,53 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                   className="space-y-4 sm:space-y-6"
                 >
                   <div className="space-y-3 sm:space-y-4">
+                    {authMode === "login" && allUsers.length > 0 && (
+                      <div className="mb-4 p-4 bg-slate-950/60 rounded-2xl border border-slate-800">
+                        <label className="block text-[9px] font-black uppercase tracking-[0.2em] text-slate-500 mb-2.5 ml-1">
+                          Select Identity Node (Auto Biometric)
+                        </label>
+                        <div className="flex flex-col gap-2 max-h-48 overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-slate-800">
+                          {allUsers.map((user) => (
+                            <button
+                              key={user.id || user.username}
+                              type="button"
+                              onClick={() => {
+                                setUsernameInput(user.username);
+                                if (handleBiometricSign) {
+                                  setTimeout(() => {
+                                    handleBiometricSign(user.username);
+                                  }, 100);
+                                }
+                              }}
+                              className="flex items-center justify-between p-3 rounded-xl bg-slate-900 border border-slate-800 hover:border-indigo-500 hover:bg-slate-800/40 transition-all text-left group cursor-pointer"
+                            >
+                              <div className="flex items-center gap-3">
+                                <div
+                                  className="w-8 h-8 rounded-lg flex items-center justify-center text-xs font-black text-white shrink-0"
+                                  style={{ backgroundColor: user.avatarColor || "#6366f1" }}
+                                >
+                                  {user.displayName?.slice(0, 2).toUpperCase() || "UN"}
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="text-xs font-bold text-white uppercase truncate group-hover:text-indigo-400 transition-colors">
+                                    {user.displayName}
+                                  </div>
+                                  <div className="text-[10px] text-slate-500 font-mono truncate">
+                                    @{user.username}
+                                  </div>
+                                </div>
+                              </div>
+                              
+                              <div className="flex items-center gap-1 bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 group-hover:bg-indigo-600 group-hover:text-white transition-all text-[9px] font-mono font-black uppercase px-2 py-1 rounded-md">
+                                <Fingerprint className="w-3.5 h-3.5" />
+                                <span>Sign</span>
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
                     <div>
                       <label className="block text-[9px] sm:text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 mb-1.5 sm:mb-2 ml-1">
                         Username
@@ -739,6 +838,17 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                     {authMode === "register" ? "Confirm" : "Unlock Identity"}
                   </button>
 
+                  {authMode === "login" && hasBiometric && (
+                    <button
+                      type="button"
+                      onClick={() => handleBiometricSign && handleBiometricSign(usernameInput)}
+                      className="w-full py-4 sm:py-5 bg-slate-800 hover:bg-slate-700 text-indigo-400 rounded-xl sm:rounded-2xl font-black uppercase tracking-widest text-[11px] sm:text-sm shadow-xl active:scale-95 transition-all mt-2 flex items-center justify-center gap-2 border border-slate-700 hover:border-indigo-500/30"
+                    >
+                      <Fingerprint className="w-4 h-4 sm:w-5 sm:h-5" />
+                      Sign Biometric Hardware
+                    </button>
+                  )}
+
                   {authMode === "login" && (
                     <div className="pt-2">
                       <p className="text-[10px] text-slate-500 text-center font-medium opacity-50 italic">
@@ -748,18 +858,41 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                   )}
                 </form>
 
-                <div className="mt-8 sm:mt-10 p-4 sm:p-6 bg-slate-950 border border-slate-800 rounded-2xl sm:rounded-3xl flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
-                  <div className="min-w-0">
-                    <p className="text-[11px] text-slate-400 leading-tight">Port & restore files offline seamlessly</p>
+                <div className="mt-8 sm:mt-10 p-5 sm:p-8 bg-slate-950 border border-slate-800 rounded-2xl sm:rounded-[32px] flex flex-col gap-6 relative overflow-hidden group">
+                  <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-500/5 rounded-full blur-2xl -mr-16 -mt-16 group-hover:bg-indigo-500/10 transition-colors" />
+                  
+                  <div className="relative z-10 space-y-2">
+                    <h4 className="text-xs sm:text-sm font-black text-white uppercase tracking-tighter flex items-center gap-2">
+                      <ShieldAlert className="w-4 h-4 text-indigo-400" />
+                      Files not showing?
+                    </h4>
+                    <p className="text-[10px] sm:text-xs text-slate-500 leading-relaxed font-medium">
+                      If your session timed out or files are missing, your encrypted data may need to be re-synced. Use your master seed or .vault pack to restore them instantly.
+                    </p>
                   </div>
-                  <div className="flex items-center gap-2">
+
+                  <div className="relative z-10 flex flex-col sm:flex-row items-center gap-3">
                     <button
                       type="button"
-                      onClick={() => setShowRecoveryDesk(true)}
-                      className="px-4 py-2 sm:py-2.5 bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-400 hover:text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-all cursor-pointer border border-indigo-500/20 text-center flex items-center justify-center gap-1.5"
+                      onClick={() => {
+                        setRecoveryTab("upload");
+                        setShowRecoveryDesk(true);
+                      }}
+                      className="w-full sm:flex-1 px-4 py-3 bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-400 hover:text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-all border border-indigo-500/20 flex items-center justify-center gap-2 group/btn"
                     >
-                      <RotateCcw className="w-3.5 h-3.5 text-indigo-400" />
-                      Open Recovery Desk
+                      <Upload className="w-3.5 h-3.5 group-hover/btn:-translate-y-0.5 transition-transform" />
+                      Restore via .vault
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRecoveryTab("seed");
+                        setShowRecoveryDesk(true);
+                      }}
+                      className="w-full sm:flex-1 px-4 py-3 bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-all border border-slate-800 flex items-center justify-center gap-2"
+                    >
+                      <Key className="w-3.5 h-3.5" />
+                      Restore via Seed
                     </button>
                   </div>
                 </div>
@@ -786,7 +919,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="absolute inset-0 bg-slate-950/85 backdrop-blur-2xl"
+              className="absolute inset-0 bg-slate-950/90 backdrop-blur-sm"
               onClick={() => setShowRecoveryDesk(false)}
             />
             <motion.div
@@ -817,7 +950,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                 {[
                   { id: "upload", label: "Pack", icon: Upload },
                   { id: "paste", label: "Paste", icon: Globe },
-                  { id: "seed", label: "Key", icon: Fingerprint }
+                  { id: "seed", label: "Key", icon: Fingerprint },
+                  { id: "sovereign", label: "Sovereign", icon: ShieldCheck }
                 ].map((tab) => (
                   <button
                     key={tab.id}
@@ -964,6 +1098,17 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                     >
                       {isProcessingRecovery ? "Deriving Credentials..." : "Reconstruct & Scan BlockDAG"}
                     </button>
+                  </div>
+                )}
+
+                {recoveryTab === "sovereign" && (
+                  <div className="space-y-6 text-left">
+                    <SovereignRecovery
+                      onKeyRestored={(restoredKey) => {
+                        setRecoverMnemonic(restoredKey);
+                        setRecoveryTab("seed");
+                      }}
+                    />
                   </div>
                 )}
               </div>

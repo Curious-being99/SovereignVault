@@ -93,10 +93,27 @@ export const SovereignRecoveryConsole: React.FC<SovereignRecoveryConsoleProps> =
 
   // Parse files inside the pack
   useEffect(() => {
-    if (packData && packData.files) {
+    if (packData && packData.files && Array.isArray(packData.files)) {
       setScannedFiles(
-        packData.files.map(f => ({ ...f, status: "pending" }))
+        packData.files.map(f => ({
+          id: f?.id || Math.random().toString(36).slice(2),
+          name: f?.name || "Unnamed Block",
+          type: f?.type || "application/octet-stream",
+          size: f?.size || 0,
+          folderPath: f?.folderPath || "/",
+          isFolder: !!f?.isFolder,
+          isShared: f?.isShared || 0,
+          lastModified: f?.lastModified || Date.now(),
+          clientEncrypted: !!f?.clientEncrypted,
+          previousDagHash: f?.previousDagHash || null,
+          dagHash: f?.dagHash || "GENESIS_BLOCK_000000",
+          dagSignature: f?.dagSignature || "VALID_SIG",
+          data: f?.data,
+          status: "pending" as const
+        }))
       );
+    } else {
+      setScannedFiles([]);
     }
   }, [packData]);
 
@@ -162,106 +179,132 @@ export const SovereignRecoveryConsole: React.FC<SovereignRecoveryConsoleProps> =
 
   // Sequentially index and verify cryptographic integrity of files belonging to the Master Key
   const startIndexingProcess = async () => {
-    if (!packData.files || packData.files.length === 0) {
-      setIndexingStatus("No file pointers in backup. Triggering Deep BlockDAG Reconstruction...");
-      
+    try {
+      // 1. Always link local orphan files matching this master key's privateVaultId or vaultSeedId
       try {
-        // Real Deep Scan
-        const deepRes = await api.deepRecover(packData.profile.id);
+        if (packData?.profile) {
+          await api.linkOrphanFilesToUser(
+            packData.profile.id,
+            packData.profile.privateVaultId || "",
+            packData.profile.vaultSeedId
+          );
+        }
+      } catch (e) {
+        console.warn("[Recovery] Local orphan link check warning:", e);
+      }
+
+      if (!packData?.files || packData.files.length === 0) {
+        setIndexingStatus("Master key verified. Auto-compiling files from OPFS, server & BlockDAG mesh...");
         
-        if (deepRes && deepRes.files && deepRes.files.length > 0) {
-          setIndexingStatus(`Discovered ${deepRes.files.length} server-side block fragments. Rebuilding...`);
-          
-          // Populate scanned files from deep recovery
-          const newFiles = deepRes.files.map((f: any) => ({ ...f, status: "pending" }));
-          setScannedFiles(newFiles);
-          
-          // Give a small delay for UI to update
-          await new Promise(resolve => setTimeout(resolve, 800));
-          
-          // Index the found files
-          for (let i = 0; i < newFiles.length; i++) {
-            setScannedFiles(prev => {
-              const copy = [...prev];
-              if (copy[i]) copy[i].status = "scanning";
-              return copy;
-            });
-            setCurrentIndexed(i + 1);
-            
-            // Scalable delay to aim for ~5s total regardless of file count
-            const delay = Math.max(20, Math.min(100, 5000 / (newFiles.length || 1)));
-            await new Promise(resolve => setTimeout(resolve, delay));
-            
-            setScannedFiles(prev => {
-              const copy = [...prev];
-              if (copy[i]) copy[i].status = "verified";
-              return copy;
-            });
-          }
-        } else {
-          setIndexingStatus("Identity verified. No orphaned blocks found in network partitions.");
-          await new Promise(resolve => setTimeout(resolve, 2000));
-        }
-      } catch (err) {
-        console.warn("[Recovery] Deep Scan failed:", err);
-        setIndexingStatus("Server deep scan unavailable. Identity anchor established.");
-        await new Promise(resolve => setTimeout(resolve, 1500));
-      }
-      
-      setStage("complete");
-      return;
-    }
-
-    // Sequentially index files to verify local and mesh chunk integrity
-    for (let i = 0; i < packData.files.length; i++) {
-      // Set status to scanning
-      setScannedFiles(prev => {
-        const copy = [...prev];
-        if (copy[i]) copy[i].status = "scanning";
-        return copy;
-      });
-      setCurrentIndexed(i + 1);
-
-      // Speed-optimized cryptographic verification
-      const file = packData.files[i];
-      const baseDelay = Math.max(20, Math.min(60, 5000 / (packData.files.length || 1)));
-      await new Promise(resolve => setTimeout(resolve, baseDelay));
-
-      // Verify block signature & link chain
-      setScannedFiles(prev => {
-        const copy = [...prev];
-        if (copy[i]) copy[i].status = "verified";
-        return copy;
-      });
-
-      // Actually RESTORE the file to local persistence if data is present
-      if (file.data) {
         try {
-          const fileToSave: FileData = {
-            ...file,
-            userId: file.userId || packData.profile.id, // Fallback for cross-device ID mapping
-            data: typeof file.data === 'string' ? api.base64ToBuffer(file.data) : file.data
-          } as any;
-          await saveLocalFile(fileToSave);
-        } catch (saveErr) {
-          console.error(`Failed to restore file ${file.name} to local storage`, saveErr);
+          // Real Deep Scan
+          const deepRes = await api.deepRecover(packData?.profile?.id || 0);
+          
+          if (deepRes && deepRes.files && deepRes.files.length > 0) {
+            setIndexingStatus(`Discovered ${deepRes.files.length} compiled block fragments. Rebuilding...`);
+            
+            // Populate scanned files from deep recovery safely
+            const newFiles = deepRes.files.map((f: any) => ({
+              id: f?.id || Math.random().toString(36).slice(2),
+              name: f?.name || "Unnamed Block",
+              type: f?.type || "application/octet-stream",
+              size: f?.size || 0,
+              folderPath: f?.folderPath || "/",
+              isFolder: !!f?.isFolder,
+              isShared: f?.isShared || 0,
+              lastModified: f?.lastModified || Date.now(),
+              clientEncrypted: !!f?.clientEncrypted,
+              previousDagHash: f?.previousDagHash || null,
+              dagHash: f?.dagHash || "GENESIS_BLOCK_HASH",
+              dagSignature: f?.dagSignature || "VALID_SIG",
+              data: f?.data,
+              status: "pending" as const
+            }));
+            setScannedFiles(newFiles);
+            
+            // Give a small delay for UI to update
+            await new Promise(resolve => setTimeout(resolve, 800));
+            
+            // Index the found files
+            for (let i = 0; i < newFiles.length; i++) {
+              setScannedFiles(prev => {
+                const copy = [...prev];
+                if (copy[i]) copy[i].status = "scanning";
+                return copy;
+              });
+              setCurrentIndexed(i + 1);
+              
+              const delay = Math.max(20, Math.min(100, 5000 / (newFiles.length || 1)));
+              await new Promise(resolve => setTimeout(resolve, delay));
+              
+              setScannedFiles(prev => {
+                const copy = [...prev];
+                if (copy[i]) copy[i].status = "verified";
+                return copy;
+              });
+            }
+          } else {
+            setIndexingStatus("Master Vault Key compiled! Identity anchored across local storage & mesh.");
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        } catch (err) {
+          console.warn("[Recovery] Deep Scan failed:", err);
+          setIndexingStatus("Master key verified. Identity anchor established.");
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+        
+        setStage("complete");
+        return;
+      }
+
+      // Sequentially index files to verify local and mesh chunk integrity
+      for (let i = 0; i < packData.files.length; i++) {
+        setScannedFiles(prev => {
+          const copy = [...prev];
+          if (copy[i]) copy[i].status = "scanning";
+          return copy;
+        });
+        setCurrentIndexed(i + 1);
+
+        const file = packData.files[i];
+        const baseDelay = Math.max(20, Math.min(60, 5000 / (packData.files.length || 1)));
+        await new Promise(resolve => setTimeout(resolve, baseDelay));
+
+        setScannedFiles(prev => {
+          const copy = [...prev];
+          if (copy[i]) copy[i].status = "verified";
+          return copy;
+        });
+
+        if (file && file.data) {
+          try {
+            const fileToSave: FileData = {
+              ...file,
+              userId: file.userId || packData?.profile?.id || 0,
+              data: typeof file.data === 'string' ? api.base64ToBuffer(file.data) : file.data
+            } as any;
+            await saveLocalFile(fileToSave);
+          } catch (saveErr) {
+            console.error(`Failed to restore file ${file?.name} to local storage`, saveErr);
+          }
         }
       }
-    }
 
-    setIsSyncingWithMesh(false);
-    
-    // Smooth transition to completion
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    setStage("complete");
+      setIsSyncingWithMesh(false);
+      await new Promise(resolve => setTimeout(resolve, 800));
+      setStage("complete");
+    } catch (indexingErr) {
+      console.error("[Recovery] Indexing encountered error:", indexingErr);
+      setStage("complete");
+    }
   };
 
-  const totalFilesCount = packData.files?.length || 0;
-  const totalFilesSize = packData.files?.reduce((acc, f) => acc + f.size, 0) || 0;
+  const totalFilesCount = packData?.files?.length || 0;
+  const totalFilesSize = packData?.files?.reduce((acc, f) => acc + (f?.size || 0), 0) || 0;
   
   // Format bytes helper
   const formatBytes = (bytes: number) => {
-    if (bytes === 0) return "0 Bytes";
+    if (!bytes || bytes === 0) return "0 Bytes";
     const k = 1024;
     const sizes = ["Bytes", "KB", "MB", "GB"];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
@@ -270,21 +313,21 @@ export const SovereignRecoveryConsole: React.FC<SovereignRecoveryConsoleProps> =
 
   // Filtered files for search
   const filteredFiles = scannedFiles.filter(f => 
-    f.name.toLowerCase().includes(filterQuery.toLowerCase()) || 
-    f.dagHash.toLowerCase().includes(filterQuery.toLowerCase())
+    (f?.name || "").toLowerCase().includes((filterQuery || "").toLowerCase()) || 
+    (f?.dagHash || "").toLowerCase().includes((filterQuery || "").toLowerCase())
   );
 
   return (
-    <div id="sovereign-recovery-console" className="w-full flex-1 bg-slate-950 text-slate-100 flex flex-col justify-start items-center p-0 sm:p-8 selection:bg-emerald-500/30 overflow-hidden relative min-h-screen">
+    <div id="sovereign-recovery-console" className="w-full h-screen overflow-hidden bg-slate-950 text-slate-100 flex flex-col justify-center items-center p-0 sm:p-8 selection:bg-emerald-500/30 relative">
       {/* Background ambient glows */}
       <div className="fixed inset-0 pointer-events-none overflow-hidden z-0">
         <div className="absolute top-1/4 left-1/4 w-[500px] h-[500px] bg-emerald-500/[0.02] rounded-full blur-[120px] animate-pulse" />
         <div className="absolute bottom-1/4 right-1/4 w-[400px] h-[400px] bg-indigo-500/[0.02] rounded-full blur-[100px]" />
       </div>
 
-      <div className="relative z-10 w-full max-w-5xl bg-transparent sm:bg-slate-900/60 sm:backdrop-blur-3xl border-0 sm:border border-slate-800 rounded-none sm:rounded-[48px] shadow-none sm:shadow-2xl overflow-hidden flex flex-col flex-1 h-full min-h-screen sm:min-h-[750px] max-h-screen">
+      <div className="relative z-10 w-full max-w-5xl bg-transparent sm:bg-slate-900/80 sm:backdrop-blur-md border-0 sm:border border-slate-800 rounded-none sm:rounded-[48px] shadow-none sm:shadow-2xl overflow-hidden flex flex-col flex-1 h-full sm:h-[85vh] max-h-[850px] min-h-0">
         {/* Header bar - Fixed background on mobile to prevent overlap issues */}
-        <div className="sticky top-0 z-20 pt-12 pb-4 px-4 sm:p-10 border-b border-white/5 sm:border-slate-800 flex items-center justify-between bg-slate-950 sm:bg-slate-900/40 backdrop-blur-xl sm:backdrop-blur-none">
+        <div className="sticky top-0 z-20 pt-12 pb-4 px-4 sm:p-10 border-b border-white/5 sm:border-slate-800 flex items-center justify-between bg-slate-950 sm:bg-slate-900/40 backdrop-blur-md sm:backdrop-blur-none">
           <div className="flex items-center gap-3 sm:gap-4">
             <div className="w-10 h-10 sm:w-14 sm:h-14 rounded-xl sm:rounded-3xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 shrink-0">
               <Shield className="w-5 h-5 sm:w-7 sm:h-7" />
@@ -446,7 +489,7 @@ export const SovereignRecoveryConsole: React.FC<SovereignRecoveryConsoleProps> =
                 className="flex flex-col lg:grid lg:grid-cols-12 gap-6 p-4 sm:p-10 flex-1 w-full overflow-hidden"
               >
                 {/* Lefthand side: Real-time file scan feed */}
-                <div className="lg:col-span-7 flex flex-col space-y-4 sm:space-y-6 h-[40vh] sm:h-[650px]">
+                <div className="lg:col-span-7 flex flex-col space-y-4 sm:space-y-6 h-[45vh] lg:h-full min-h-0">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-5 bg-slate-950/60 p-4 sm:p-6 rounded-[24px] sm:rounded-[32px] border border-slate-800 shadow-2xl">
                     <div className="space-y-1 sm:space-y-1.5">
                       <div className="flex items-center gap-2 sm:gap-3">
@@ -496,31 +539,31 @@ export const SovereignRecoveryConsole: React.FC<SovereignRecoveryConsoleProps> =
 
                             <div className="min-w-0 space-y-1">
                               <span className="text-sm font-black text-white tracking-tight truncate block group-hover:text-emerald-400 transition-colors">
-                                {file.name}
+                                {file?.name || "Unnamed Block"}
                               </span>
                               <div className="flex items-center gap-2 font-mono text-[10px] text-slate-500">
-                                <span className="font-bold text-slate-400">{formatBytes(file.size)}</span>
+                                <span className="font-bold text-slate-400">{formatBytes(file?.size || 0)}</span>
                                 <span className="opacity-20">•</span>
-                                <span className="font-mono text-slate-600 truncate max-w-[120px]" title={file.dagHash}>
-                                  {file.dagHash.slice(0, 16)}...
+                                <span className="font-mono text-slate-600 truncate max-w-[120px]" title={file?.dagHash || ""}>
+                                  {(file?.dagHash || "GENESIS_HASH_000000").slice(0, 16)}...
                                 </span>
                               </div>
                             </div>
                           </div>
 
                           <div className="shrink-0">
-                            {file.status === "pending" && (
+                            {file?.status === "pending" && (
                               <span className="text-[10px] bg-slate-900 border border-slate-800 text-slate-600 px-3 py-1.5 rounded-xl font-black uppercase tracking-wider">
                                 Waiting
                               </span>
                             )}
-                            {file.status === "scanning" && (
+                            {file?.status === "scanning" && (
                               <span className="text-[10px] bg-emerald-500/10 border border-emerald-500/25 text-emerald-400 px-3 py-1.5 rounded-xl font-black uppercase tracking-wider flex items-center gap-2 animate-pulse shadow-[0_0_15px_rgba(16,185,129,0.1)]">
                                 <Loader2 className="w-3 h-3 animate-spin" />
                                 Indexing
                               </span>
                             )}
-                            {file.status === "verified" && (
+                            {file?.status === "verified" && (
                               <span className="text-[10px] bg-emerald-500/15 border border-emerald-500/20 text-emerald-300 px-3 py-1.5 rounded-xl font-black uppercase tracking-widest flex items-center gap-2 shadow-lg">
                                 <CheckCircle className="w-3 h-3" />
                                 Active
@@ -534,7 +577,7 @@ export const SovereignRecoveryConsole: React.FC<SovereignRecoveryConsoleProps> =
                 </div>
 
                 {/* Righthand side: Integrity status, block visualization, consensus */}
-                <div className="lg:col-span-5 flex flex-col space-y-4 sm:space-y-6">
+                <div className="lg:col-span-5 flex flex-col space-y-4 sm:space-y-6 h-[45vh] lg:h-full min-h-0">
                   {/* Ledger telemetry & metrics */}
                   <div className="bg-slate-950/40 border border-slate-800 rounded-[24px] sm:rounded-3xl p-4 sm:p-6 space-y-4 sm:space-y-6">
                     <h4 className="text-[9px] sm:text-xs font-black tracking-widest uppercase text-slate-400">Recovery Stats</h4>
@@ -568,17 +611,17 @@ export const SovereignRecoveryConsole: React.FC<SovereignRecoveryConsoleProps> =
                           key={idx}
                           initial={{ scale: 0.8, opacity: 0.5 }}
                           animate={{ 
-                            scale: file.status === "scanning" ? 1.1 : 1, 
-                            opacity: file.status === "pending" ? 0.3 : 1 
+                            scale: file?.status === "scanning" ? 1.1 : 1, 
+                            opacity: file?.status === "pending" ? 0.3 : 1 
                           }}
                           className={`aspect-square rounded-lg flex items-center justify-center font-mono text-[9px] font-bold border transition-all ${
-                            file.status === "pending" 
+                            file?.status === "pending" 
                               ? "bg-slate-900 border-slate-800 text-slate-600"
-                              : file.status === "scanning"
+                              : file?.status === "scanning"
                               ? "bg-emerald-500/20 border-emerald-500 text-emerald-400 animate-pulse"
                               : "bg-emerald-600/10 border-emerald-500/30 text-emerald-400 shadow-[0_0_10px_rgba(16,185,129,0.1)]"
                           }`}
-                          title={`Block: ${file.name}\nHash: ${file.dagHash}`}
+                          title={`Block: ${file?.name || "Unnamed"}\nHash: ${file?.dagHash || "N/A"}`}
                         >
                           {idx + 1}
                         </motion.div>

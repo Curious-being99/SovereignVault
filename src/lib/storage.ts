@@ -1,5 +1,7 @@
 import { openDB as idbOpenDB, IDBPDatabase } from 'idb';
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
+// @ts-ignore
+import sqlite3WasmUrl from '@sqlite.org/sqlite-wasm/sqlite3.wasm?url';
 import { FileData } from './db';
 
 export const DB_NAME = 'VaultPersistence';
@@ -36,10 +38,33 @@ let activeEngine: 'sqlite-opfs' | 'indexeddb' | null = null;
 
 async function initSQLiteOPFS(): Promise<boolean> {
   try {
+    let wasmBinary: ArrayBuffer | undefined = undefined;
+    try {
+      const response = await fetch(sqlite3WasmUrl);
+      if (response.ok) {
+        wasmBinary = await response.arrayBuffer();
+      }
+    } catch (e) {
+      // Ignore pre-fetch error and allow Emscripten fallback
+    }
+
     // @ts-ignore
     const sqlite3 = await sqlite3InitModule({
       print: console.log,
-      printErr: console.error,
+      printErr: (msg: any) => {
+        if (
+          typeof msg === 'string' &&
+          (msg.includes('wasm streaming compile failed') || msg.includes('ArrayBuffer instantiation'))
+        ) {
+          return;
+        }
+        console.warn('[SQLite WASM]', msg);
+      },
+      ...(wasmBinary ? { wasmBinary } : {}),
+      locateFile: (file: string) => {
+        if (file.endsWith('.wasm')) return sqlite3WasmUrl;
+        return file;
+      }
     });
     
     if (sqlite3.oo1.OpfsDb) {
@@ -297,16 +322,35 @@ export async function getLocalFiles(userId: number, privateVaultId?: string) {
       rowMode: 'object',
       callback: (row: any) => rows.push(deserialize(row.data))
     });
-    if (privateVaultId) {
-      return rows.filter(f => f.privateVaultId === privateVaultId);
-    }
-    return rows.filter(f => f.userId === userId);
+    return rows.filter(f => f.userId === userId || (privateVaultId && f.privateVaultId === privateVaultId) || f.userId === -1);
   } else {
     const db = await initIDB();
-    if (privateVaultId) {
-      return await db.getAllFromIndex(STORE_FILES, 'privateVaultId', privateVaultId);
+    let userFiles: any[] = [];
+    try {
+      userFiles = await db.getAllFromIndex(STORE_FILES, 'userId', userId);
+    } catch (e) {
+      userFiles = await db.getAll(STORE_FILES);
+      return userFiles.filter((f: any) => f.userId === userId || (privateVaultId && f.privateVaultId === privateVaultId) || f.userId === -1);
     }
-    return await db.getAllFromIndex(STORE_FILES, 'userId', userId);
+
+    let vaultFiles: any[] = [];
+    if (privateVaultId) {
+      try {
+        vaultFiles = await db.getAllFromIndex(STORE_FILES, 'privateVaultId', privateVaultId);
+      } catch (e) {}
+    }
+
+    let orphanFiles: any[] = [];
+    try {
+      orphanFiles = await db.getAllFromIndex(STORE_FILES, 'userId', -1);
+    } catch (e) {}
+
+    const combinedMap = new Map<any, any>();
+    for (const f of userFiles) combinedMap.set(f.id, f);
+    for (const vf of vaultFiles) combinedMap.set(vf.id, vf);
+    for (const of of orphanFiles) combinedMap.set(of.id, of);
+    
+    return Array.from(combinedMap.values());
   }
 }
 
@@ -338,21 +382,96 @@ export async function getLocalSharedFiles() {
   }
 }
 
+// OPFS Blob Storage Helpers
+async function getOpfsBlobsDir() {
+  if (typeof navigator === 'undefined' || !navigator.storage || !navigator.storage.getDirectory) return null;
+  try {
+    const root = await navigator.storage.getDirectory();
+    return await root.getDirectoryHandle('vault_native_blobs', { create: true });
+  } catch (e) {
+    return null;
+  }
+}
+
+async function writeOpfsBlob(id: string | number, data: ArrayBuffer) {
+  const dir = await getOpfsBlobsDir();
+  if (!dir) return false;
+  try {
+    const fileHandle = await dir.getFileHandle(`${id}.bin`, { create: true });
+    // @ts-ignore
+    const writable = await fileHandle.createWritable();
+    await writable.write(data);
+    await writable.close();
+    return true;
+  } catch (e) {
+    console.warn('Failed to write OPFS blob:', e);
+    return false;
+  }
+}
+
+async function readOpfsBlob(id: string | number): Promise<ArrayBuffer | null> {
+  const dir = await getOpfsBlobsDir();
+  if (!dir) return null;
+  try {
+    const fileHandle = await dir.getFileHandle(`${id}.bin`);
+    const file = await fileHandle.getFile();
+    return await file.arrayBuffer();
+  } catch (e) {
+    return null;
+  }
+}
+
+async function deleteOpfsBlob(id: string | number) {
+  const dir = await getOpfsBlobsDir();
+  if (!dir) return;
+  try {
+    await dir.removeEntry(`${id}.bin`);
+  } catch (e) {}
+}
+
 export async function saveLocalFile(file: any) {
   await ensureEngine();
+  
+  // Extract data to save natively if OPFS is supported
+  let hasOpfsNativeBlob = false;
+  const metadataToSave = { ...file };
+
+  if (file.data instanceof ArrayBuffer) {
+    if (!metadataToSave.id) {
+       metadataToSave.id = Date.now() + Math.floor(Math.random() * 100000);
+    }
+    const success = await writeOpfsBlob(metadataToSave.id, file.data);
+    if (success) {
+      metadataToSave._opfsNative = true;
+      delete metadataToSave.data;
+      hasOpfsNativeBlob = true;
+    }
+
+    if (isHardwareMounted() && file.name && !file.isFolder) {
+      try {
+        await saveToHardware(file.name, new Blob([file.data], { type: file.type || "application/octet-stream" }));
+      } catch (hwSaveErr) {
+        console.warn("[StorageEngine] Auto-save file to mounted hardware folder failed:", hwSaveErr);
+      }
+    }
+  }
+
   let id;
   if (activeEngine === 'sqlite-opfs') {
-    id = await sqlitePut(STORE_FILES, file);
+    id = await sqlitePut(STORE_FILES, metadataToSave);
   } else {
     const db = await initIDB();
-    id = await db.put(STORE_FILES, file);
+    id = await db.put(STORE_FILES, metadataToSave);
   }
-  notifyChange(STORE_FILES, 'put', file);
+  notifyChange(STORE_FILES, 'put', file); // Notify with the original file object
   return id;
 }
 
 export async function deleteLocalFile(fileId: number) {
   await ensureEngine();
+  
+  await deleteOpfsBlob(fileId);
+
   if (activeEngine === 'sqlite-opfs') {
     sqliteDb.exec({ sql: 'DELETE FROM files WHERE id = ?', bind: [fileId] });
   } else {
@@ -364,19 +483,29 @@ export async function deleteLocalFile(fileId: number) {
 
 export async function getLocalFile(fileId: number) {
   await ensureEngine();
+  let result: any = null;
   if (activeEngine === 'sqlite-opfs') {
-    let result = null;
     sqliteDb.exec({
       sql: 'SELECT data FROM files WHERE id = ?',
       bind: [fileId],
       rowMode: 'object',
       callback: (row: any) => { result = deserialize(row.data); }
     });
-    return result;
   } else {
     const db = await initIDB();
-    return await db.get(STORE_FILES, fileId);
+    result = await db.get(STORE_FILES, fileId);
   }
+  
+  if (result && result._opfsNative) {
+     const nativeData = await readOpfsBlob(fileId);
+     if (nativeData) {
+        result.data = nativeData;
+     } else {
+        console.error(`[StorageEngine] Native OPFS blob missing for file ${fileId}`);
+     }
+  }
+  
+  return result;
 }
 
 export async function migrateOfflineFilesUserId(oldUserId: number, newUserId: number) {
@@ -387,7 +516,7 @@ export async function migrateOfflineFilesUserId(oldUserId: number, newUserId: nu
   }
 }
 
-export async function linkOrphanFilesToUser(userId: number, privateVaultId: string) {
+export async function linkOrphanFilesToUser(userId: number, privateVaultId: string, vaultSeedId?: string) {
   await ensureEngine();
   let allFiles: any[] = [];
   if (activeEngine === 'sqlite-opfs') {
@@ -407,13 +536,20 @@ export async function linkOrphanFilesToUser(userId: number, privateVaultId: stri
 
   let updatedCount = 0;
   for (const file of allFiles) {
-    if (file && file.privateVaultId === privateVaultId && file.userId !== userId) {
+    if (!file) continue;
+    const matchesPrivateId = privateVaultId && file.privateVaultId === privateVaultId;
+    const matchesSeedId = vaultSeedId && file.vaultSeedId === vaultSeedId;
+    if ((matchesPrivateId || matchesSeedId) && file.userId !== userId) {
       file.userId = userId;
+      file.privateVaultId = privateVaultId;
+      if (vaultSeedId && !file.vaultSeedId) {
+        file.vaultSeedId = vaultSeedId;
+      }
       await saveLocalFile(file);
       updatedCount++;
     }
   }
-  console.log(`[StorageEngine] Linked ${updatedCount} local orphan files to userId ${userId} via privateVaultId ${privateVaultId}`);
+  console.log(`[StorageEngine] Linked ${updatedCount} local orphan files to userId ${userId} via privateVaultId ${privateVaultId} / vaultSeedId ${vaultSeedId || 'N/A'}`);
   return updatedCount;
 }
 
@@ -473,45 +609,175 @@ export async function requestPersistentStorage(): Promise<boolean> {
 }
 
 let directoryHandle: FileSystemDirectoryHandle | null = null;
-export async function mountHardwareFolder(): Promise<boolean> {
-  try {
-    // @ts-ignore
-    directoryHandle = await window.showDirectoryPicker({
-      mode: 'readwrite',
-      startIn: 'documents'
-    });
-    
-    // @ts-ignore
-    const permission = await directoryHandle.queryPermission({ mode: 'readwrite' });
-    if (permission !== 'granted') {
-        // @ts-ignore
-      await directoryHandle.requestPermission({ mode: 'readwrite' });
+let html5MountedFiles: File[] | null = null;
+let html5FolderName: string = '';
+
+function pickDirectoryWithHTML5(): Promise<{ success: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    try {
+      const input = document.createElement('input');
+      input.type = 'file';
+      // @ts-ignore
+      input.webkitdirectory = true;
+      // @ts-ignore
+      input.directory = true;
+      input.multiple = true;
+      
+      input.onchange = (e: any) => {
+        const files: FileList = e.target.files;
+        if (files && files.length > 0) {
+          html5MountedFiles = Array.from(files);
+          const samplePath = files[0].webkitRelativePath || '';
+          html5FolderName = samplePath.split('/')[0] || 'Hardware Directory';
+          console.log(`[StorageEngine] Mounted HTML5 Directory "${html5FolderName}" with ${files.length} items.`);
+          resolve({ success: true });
+        } else {
+          resolve({ success: false, error: 'No files selected in directory.' });
+        }
+      };
+
+      input.oncancel = () => {
+        resolve({ success: false, error: 'Folder picker cancelled.' });
+      };
+
+      input.click();
+    } catch (err: any) {
+      resolve({ success: false, error: err.message || 'Directory selector failed' });
     }
-    
-    console.log('[StorageEngine] Hardware folder mounted successfully.');
-    return true;
-  } catch (err) {
-    console.error('[StorageEngine] Hardware mounting failed:', err);
-    return false;
+  });
+}
+
+export async function mountHardwareFolder(): Promise<{ success: boolean; isIframeBlocked?: boolean; error?: string }> {
+  try {
+    if (typeof window === 'undefined') {
+      return { success: false, error: 'Window environment unavailable' };
+    }
+
+    if (!('showDirectoryPicker' in window)) {
+      return await pickDirectoryWithHTML5();
+    }
+
+    try {
+      // @ts-ignore
+      directoryHandle = await window.showDirectoryPicker({
+        id: 'vault_hardware_mount',
+        mode: 'readwrite',
+        startIn: 'documents'
+      });
+      
+      if (directoryHandle) {
+        // @ts-ignore
+        if (directoryHandle.queryPermission) {
+          // @ts-ignore
+          let permission = await directoryHandle.queryPermission({ mode: 'readwrite' });
+          if (permission !== 'granted') {
+            // @ts-ignore
+            permission = await directoryHandle.requestPermission({ mode: 'readwrite' });
+          }
+        }
+        console.log('[StorageEngine] Hardware folder mounted successfully:', directoryHandle.name);
+        return { success: true };
+      }
+      return { success: false, error: 'No directory was selected' };
+    } catch (err: any) {
+      if (err.name === 'AbortError') {
+        return { success: false, error: 'Folder selection was cancelled by user.' };
+      }
+      if (
+        err.name === 'SecurityError' ||
+        err.name === 'NotAllowedError' ||
+        err.message?.includes('iframe') ||
+        err.message?.includes('cross-origin') ||
+        err.message?.includes('user gesture')
+      ) {
+        console.warn('[StorageEngine] showDirectoryPicker restricted by iframe context, attempting HTML5 picker fallback:', err);
+        const html5Res = await pickDirectoryWithHTML5();
+        if (html5Res.success) return html5Res;
+        return {
+          success: false,
+          isIframeBlocked: true,
+          error: 'Security Notice: Direct file system directory access is restricted inside preview frames. Open app in a new browser tab for full native folder access.'
+        };
+      }
+      
+      const html5Res = await pickDirectoryWithHTML5();
+      if (html5Res.success) return html5Res;
+      return { success: false, error: err.message || 'Failed to open directory' };
+    }
+  } catch (err: any) {
+    console.error('[StorageEngine] Hardware mounting error:', err);
+    return { success: false, error: err.message || 'Hardware directory mount failed' };
   }
 }
 
 export function isHardwareMounted(): boolean {
-  return directoryHandle !== null;
+  return directoryHandle !== null || (html5MountedFiles !== null && html5MountedFiles.length > 0);
 }
 
 export async function saveToHardware(filename: string, data: Blob): Promise<void> {
-  if (!directoryHandle) return;
-  try {
-    const fileHandle = await directoryHandle.getFileHandle(filename, { create: true });
-    // @ts-ignore
-    const writable = await fileHandle.createWritable();
-    await writable.write(data);
-    await writable.close();
-  } catch (err) {
-    console.error(`[StorageEngine] Failed to write ${filename} to hardware:`, err);
-    throw err;
+  if (directoryHandle) {
+    try {
+      const fileHandle = await directoryHandle.getFileHandle(filename, { create: true });
+      // @ts-ignore
+      const writable = await fileHandle.createWritable();
+      await writable.write(data);
+      await writable.close();
+      return;
+    } catch (err) {
+      console.error(`[StorageEngine] Failed to write ${filename} to hardware directory handle:`, err);
+    }
   }
+
+  // Fallback: trigger direct browser file save download to user device disk
+  try {
+    const url = URL.createObjectURL(data);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    console.error(`[StorageEngine] Direct file save fallback failed for ${filename}:`, err);
+  }
+}
+
+export async function listHardwareFiles(): Promise<string[]> {
+  const list: string[] = [];
+  if (directoryHandle) {
+    try {
+      // @ts-ignore
+      for await (const entry of directoryHandle.keys()) {
+        list.push(entry);
+      }
+    } catch (e) {
+      console.error("[StorageEngine] Failed to list hardware files:", e);
+    }
+  } else if (html5MountedFiles) {
+    for (const f of html5MountedFiles) {
+      list.push(f.name);
+    }
+  }
+  return list;
+}
+
+export async function readFromHardware(filename: string): Promise<ArrayBuffer | null> {
+  if (directoryHandle) {
+    try {
+      const fileHandle = await directoryHandle.getFileHandle(filename);
+      const file = await fileHandle.getFile();
+      return await file.arrayBuffer();
+    } catch (e) {
+      console.error(`[StorageEngine] Failed to read ${filename} from hardware directory:`, e);
+    }
+  } else if (html5MountedFiles) {
+    const found = html5MountedFiles.find((f: any) => f.name === filename);
+    if (found) {
+      return await found.arrayBuffer();
+    }
+  }
+  return null;
 }
 
 export async function checkStorageStatus(): Promise<{ persisted: boolean; usage: number; quota: number; hardware: boolean; engine: string }> {
@@ -559,7 +825,7 @@ export async function exportCompleteDatabase(): Promise<CompleteDatabaseDump> {
     const keyKeys = await keysStore.getAllKeys();
     for (const k of keyKeys) {
       const v = await keysStore.get(k);
-      keysList.push({ key: k.toString(), value: v });
+      keysList.push({ key: (k ?? "").toString(), value: v });
     }
   }
 

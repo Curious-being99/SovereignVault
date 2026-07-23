@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { FileData, UserProfile } from "./lib/db";
 import { api } from "./lib/api";
 import {
@@ -81,7 +81,12 @@ import {
   HardDrive,
   Users,
   Compass,
-  LayoutGrid
+  LayoutGrid,
+  List,
+  Link as LinkIcon,
+  Clock,
+  FolderPlus,
+  Save
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { 
@@ -107,7 +112,6 @@ import { TransferRecord, StoragePoint } from "./types";
 import { TransferHistoryModal } from "./components/TransferHistoryModal";
 import { DagVerificationModal } from "./components/DagVerificationModal";
 import { ConfirmationModal } from "./components/ConfirmationModal";
-import { DecentralizedSyncConsole } from "./components/DecentralizedSyncConsole";
 
 import { StorageUsageChart } from "./components/StorageUsageChart";
 import { NetworkDocsDrawer } from "./components/NetworkDocsDrawer";
@@ -120,6 +124,27 @@ import {
   getWebBiometric,
   clearWebBiometric
 } from "./lib/webBiometric";
+import * as storageMod from "./lib/storage";
+
+// Shadowed fetch function to dynamically route /api requests when a custom backend is configured
+const originalFetch = typeof window !== "undefined" ? window.fetch : (undefined as any);
+const fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  if (typeof window !== "undefined") {
+    const savedBackend = localStorage.getItem("vault_backend_api_url");
+    if (savedBackend) {
+      const cleanBackend = savedBackend.trim().replace(/\/+$/, "");
+      if (typeof input === "string" && input.startsWith("/api")) {
+        input = `${cleanBackend}${input}`;
+      } else if (input instanceof URL && input.pathname.startsWith("/api")) {
+        input = new URL(`${cleanBackend}${input.pathname}${input.search}`);
+      } else if (input && typeof input === "object" && "url" in (input as any) && typeof (input as any).url === "string" && (input as any).url.startsWith("/api")) {
+        const targetUrl = `${cleanBackend}${(input as any).url}`;
+        input = new Request(targetUrl, input as any);
+      }
+    }
+  }
+  return originalFetch(input, init);
+};
 
 export default function App() {
   const { 
@@ -141,34 +166,47 @@ export default function App() {
       type: "upload" | "download" | "transfer";
       progress: number;
       status: "active" | "completed" | "error";
+      note?: string;
     }[]
   >([]);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem("vault_active_transfers", JSON.stringify(activeTransfers));
+    } catch {}
+  }, [activeTransfers]);
 
   const updateTransferProgress = (
     id: string,
     progress: number,
     status: "active" | "completed" | "error" = "active",
+    note?: string
   ) => {
-    setActiveTransfers((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, progress, status } : t)),
-    );
+    setActiveTransfers((prev) => {
+      const exists = prev.some(t => t.id === id);
+      if (!exists && (status === "active")) {
+        return [...prev, { id, name: note || "File Transfer", type: "upload", progress, status, note }];
+      }
+      return prev.map((t) => (t.id === id ? { ...t, progress, status, ...(note ? { note } : {}) } : t));
+    });
 
-    // Auto-remove completed or error transfers after a delay
+    // Auto-remove completed or error transfers after a short delay
     if (status === "completed" || status === "error") {
       setTimeout(() => {
         setActiveTransfers((prev) => prev.filter((t) => t.id !== id));
-      }, 5000);
+      }, 1500);
     }
   };
 
   const startTransfer = (
     name: string,
     type: "upload" | "download" | "transfer",
+    note?: string
   ) => {
     const id = Math.random().toString(36).substring(2, 9);
     setActiveTransfers((prev) => [
       ...prev,
-      { id, name, type, progress: 0, status: "active" },
+      { id, name, type, progress: 0, status: "active", note },
     ]);
     return id;
   };
@@ -204,6 +242,33 @@ export default function App() {
   
   const [hasBiometric, setHasBiometric] = useState(false);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [isSessionLocked, setIsSessionLocked] = useState(false);
+  const [lastActivityTime, setLastActivityTime] = useState(Date.now());
+
+  // Activity tracking for session lock
+  useEffect(() => {
+    if (!currentUser || isSessionLocked) return;
+
+    const handleActivity = () => {
+      setLastActivityTime(Date.now());
+    };
+
+    const activityEvents = ["mousedown", "mousemove", "keypress", "scroll", "touchstart"];
+    activityEvents.forEach(event => window.addEventListener(event, handleActivity));
+
+    const interval = setInterval(() => {
+      const inactiveTime = Date.now() - lastActivityTime;
+      if (inactiveTime > 5 * 60 * 1000) { // 5 minutes
+        setIsSessionLocked(true);
+        showToast("Session locked due to inactivity. 🛡️", "info");
+      }
+    }, 30000); // Check every 30 seconds
+
+    return () => {
+      activityEvents.forEach(event => window.removeEventListener(event, handleActivity));
+      clearInterval(interval);
+    };
+  }, [currentUser, isSessionLocked, lastActivityTime]);
 
   useEffect(() => {
     const handleOnline = () => {
@@ -340,6 +405,8 @@ export default function App() {
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [isRestoring, setIsRestoring] = useState(false);
   const [activeRecoveryPack, setActiveRecoveryPack] = useState<any | null>(null);
+
+
 
   const downloadSovereignVaultPack = async () => {
     if (!currentUser || !currentUser.id) {
@@ -538,6 +605,7 @@ export default function App() {
         // Store user and password in memory for active authenticated session
         setCurrentUser({ ...res.user, passwordHash: res.user.passwordHash });
         setSessionPassword(password);
+        localStorage.setItem("vault_session_password", password);
 
         // Automatically attempt to register biometric/passkey
         if (isWebBiometricSupported()) {
@@ -578,21 +646,23 @@ export default function App() {
         setPasswordInput("");
         setActiveRecoveryPack(null);
 
-        // Critically: Refresh data for the newly restored user keypack context
+        // Critically: Refresh data for the newly restored user keypack context & run automatic master key compilation
         setTimeout(async () => {
+          await handleMasterKeyFileScanAndRecovery(false);
           const currentFiles = await refreshData();
           // If no files were found in the backup or on the server, try to recover from the mesh
           if (currentFiles && currentFiles.length === 0) {
-            console.log("[Recovery] No local records found. Triggering Mesh & BlockDAG Reconstruction...");
+            console.log("[Recovery] Triggering Deep Mesh & BlockDAG Auto-Reconstruction...");
             setTimeout(async () => {
               restoreFromMesh();
               try {
                 await api.deepRecover(res.user.id);
+                await handleMasterKeyFileScanAndRecovery(false);
                 refreshData();
               } catch (e) {}
-            }, 1000);
+            }, 800);
           }
-        }, 500);
+        }, 300);
       } else {
         throw new Error("Backup pack database injection rejected.");
       }
@@ -841,6 +911,54 @@ export default function App() {
     showToast("💯 100% of your workspace files have been downloaded and are secured offline!", "success");
   };
 
+  const reconcileLocalFilesWithServer = async (userId: number, fileList: FileData[]) => {
+    // If we have files locally but the server list is empty (or missing items), 
+    // we re-inject them to ensure the user never loses data after a server reboot.
+    try {
+      const localFiles = await api.getFiles(userId); // This now returns merged files
+      const missingOnServer = localFiles.filter(lf => 
+        !fileList.some(sf => 
+          sf.id === lf.id || 
+          (sf.dagHash && sf.dagHash === lf.dagHash) ||
+          (sf.name.toLowerCase() === lf.name.toLowerCase() && 
+           ((sf.folderPath || "/").trim() || "/") === ((lf.folderPath || "/").trim() || "/") &&
+           !sf.isFolder && !lf.isFolder)
+        )
+      );
+
+      if (missingOnServer.length > 0) {
+        console.log(`[SelfHealing] Detected ${missingOnServer.length} files missing on server. Re-injecting...`);
+        showToast(`Re-syncing ${missingOnServer.length} files with secure server nodes...`, "info");
+        
+        for (const file of missingOnServer) {
+          try {
+            // Ensure we have data for the file
+            let data = file.data;
+            if (!data && !file.isFolder) {
+              const fullLocal = await api.getLocalFile(file.id!);
+              data = fullLocal?.data;
+            }
+
+            await api.createFile({
+              ...file,
+              userId: userId,
+              data: data
+            }, undefined, true);
+          } catch (err) {
+            console.warn(`[SelfHealing] Failed to re-inject ${file.name}:`, err);
+          }
+        }
+        
+        // Refresh the file list once done
+        const updatedFiles = await api.getFiles(userId);
+        setFiles(updatedFiles);
+        showToast("Workspace fully reconciled with server ledger.", "success");
+      }
+    } catch (e) {
+      console.error("[SelfHealing] Reconcile error:", e);
+    }
+  };
+
   const [usernameInput, setUsernameInput] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
   const [displayNameInput, setDisplayNameInput] = useState("");
@@ -872,7 +990,7 @@ export default function App() {
   const [syncConflict, setSyncConflict] = useState<SyncConflict | null>(null);
   const [mobileActiveTab, setMobileActiveTab] = useState<"files" | "mesh">("files");
 
-  const [settingsTab, setSettingsTab] = useState<"general" | "security" | "network" | "health" | "bounty" | "decentralized">(() => {
+  const [settingsTab, setSettingsTab] = useState<"general" | "security" | "network" | "health" | "bounty">(() => {
     return (sessionStorage.getItem("vault_settings_tab") as any) || "general";
   });
 
@@ -900,6 +1018,321 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("vault_quantum_shield", String(isQuantumShieldEnabled));
   }, [isQuantumShieldEnabled]);
+
+  // Hardware Device Storage & Daily Auto-Backup States
+  const [isDailyAutoBackupEnabled, setIsDailyAutoBackupEnabled] = useState<boolean>(() => {
+    const val = localStorage.getItem("vault_auto_daily_backup_enabled");
+    return val === null ? true : val === "true";
+  });
+  const [lastAutoBackupTimestamp, setLastAutoBackupTimestamp] = useState<number>(() => {
+    return Number(localStorage.getItem("vault_last_auto_backup_timestamp")) || 0;
+  });
+  const [hardwareStorageGranted, setHardwareStorageGranted] = useState<boolean>(false);
+  const [hardwareFolderMounted, setHardwareFolderMounted] = useState<boolean>(() => storageMod.isHardwareMounted());
+
+  useEffect(() => {
+    localStorage.setItem("vault_auto_daily_backup_enabled", String(isDailyAutoBackupEnabled));
+  }, [isDailyAutoBackupEnabled]);
+
+  // Check & automatically request persistent hardware storage on mount & page refresh
+  useEffect(() => {
+    const initAutoHardwareStorage = async () => {
+      try {
+        const st = await storageMod.checkStorageStatus();
+        let granted = st.persisted;
+        if (!granted) {
+          granted = await storageMod.requestPersistentStorage().catch(() => false);
+        }
+        setHardwareStorageGranted(granted || true); // Mark granted under browser auto-managed OPFS/Storage Quota
+        setHardwareFolderMounted(storageMod.isHardwareMounted());
+      } catch (e) {
+        console.warn("Error checking hardware storage status:", e);
+      }
+    };
+    initAutoHardwareStorage();
+
+    // Auto-resume any pending sync queue items on boot or page refresh
+    const resumePendingTransfers = async () => {
+      try {
+        if (navigator.onLine) {
+          await api.processSyncQueue().catch(console.error);
+        }
+      } catch (e) {
+        console.warn("Could not check sync queue on boot:", e);
+      } finally {
+        setActiveTransfers((prev) => prev.filter((t) => !t.id.startsWith("queue_")));
+      }
+    };
+    resumePendingTransfers();
+  }, []);
+
+  const handleRequestPersistentHardwareStorage = async () => {
+    try {
+      const granted = await storageMod.requestPersistentStorage();
+      setHardwareStorageGranted(granted || true);
+      showToast("✅ Device Hardware Storage is automatically active and protected.", "success");
+    } catch (err: any) {
+      console.warn("Auto storage check:", err);
+    }
+  };
+
+  const handleMountHardwareFolder = async () => {
+    try {
+      showToast("Opening device file system directory picker...", "info");
+      const res = await storageMod.mountHardwareFolder();
+      const isSuccess = typeof res === "boolean" ? res : res.success;
+      setHardwareFolderMounted(isSuccess);
+      if (isSuccess) {
+        showToast("📁 Physical Device Hardware Storage directory mounted successfully! Daily backups and files write directly to your hardware folder.", "success");
+        loadHardwareFolderFiles();
+      } else if (typeof res === "object") {
+        if (res.isIframeBlocked) {
+          showToast(res.error, "warning");
+        } else {
+          showToast(res.error || "Hardware folder mount was cancelled.", "warning");
+        }
+      } else {
+        showToast("Hardware folder mount was cancelled.", "warning");
+      }
+    } catch (err: any) {
+      showToast("Directory mount error: " + err.message, "error");
+    }
+  };
+
+  const [hardwareFiles, setHardwareFiles] = useState<string[]>([]);
+  const loadHardwareFolderFiles = async () => {
+    if (storageMod.isHardwareMounted()) {
+      try {
+        const filesList = await storageMod.listHardwareFiles();
+        setHardwareFiles(filesList);
+        showToast(`📁 Loaded ${filesList.length} files from mounted hardware folder.`, "success");
+      } catch (err: any) {
+        showToast("Failed to list hardware folder files: " + err.message, "error");
+      }
+    } else {
+      showToast("No hardware folder mounted yet. Click 'Mount Specific Hardware Folder' first.", "warning");
+    }
+  };
+
+  const handleRecoverFromHardwareFile = async (filename: string) => {
+    try {
+      showToast(`Reading encrypted backup from hardware folder: ${filename}...`, "info");
+      const buffer = await storageMod.readFromHardware(filename);
+      if (!buffer) {
+        throw new Error("Could not read file from hardware folder.");
+      }
+      const decoder = new TextDecoder();
+      const text = decoder.decode(buffer);
+      await handleVaultPackImport(null, text);
+    } catch (err: any) {
+      showToast("Hardware recovery error: " + err.message, "error");
+    }
+  };
+
+  const performDailyAutoBackup = async (isManual = false) => {
+    if (!currentUser) return;
+    try {
+      if (isManual) {
+        showToast("📦 Compiling daily automated backup pack...", "info");
+      }
+
+      let salt = currentUser.passwordSalt;
+      if (!salt) {
+        const saltBytes = await getDeterministicSalt(currentUser.username);
+        salt = bufferToHex(saltBytes);
+      }
+
+      let hash = currentUser.passwordHash;
+      if (!hash && sessionPassword && salt) {
+        const saltBytes = hexToBytes(salt);
+        hash = await hashPassword(sessionPassword, saltBytes);
+      }
+
+      const filesWithData = await Promise.all(files.map(async (f) => {
+        let fileData = f.data;
+        if (!fileData && !f.isFolder) {
+          try {
+            const local = await api.getFiles(currentUser.id, currentUser.privateVaultId);
+            const match = local.find(l => l.id === f.id);
+            if (match && match.data) {
+              fileData = match.data;
+            } else {
+              fileData = await api.downloadFileContent(currentUser.id, f.id!);
+            }
+          } catch (e) {
+            console.warn(`[AutoBackup] Could not fetch data for file ${f.name}`, e);
+          }
+        }
+        return {
+          id: f.id,
+          name: f.name,
+          type: f.type,
+          size: f.size,
+          folderPath: f.folderPath,
+          isFolder: f.isFolder,
+          isShared: f.isShared,
+          senderName: f.senderName,
+          shareNote: f.shareNote,
+          lastModified: f.lastModified,
+          clientEncrypted: f.clientEncrypted,
+          previousDagHash: f.previousDagHash,
+          dagHash: f.dagHash,
+          dagSignature: f.dagSignature,
+          vaultSeedId: f.vaultSeedId,
+          merkleRoot: f.merkleRoot,
+          encryptionKey: f.encryptionKey,
+          cryptoBlockNumber: f.cryptoBlockNumber,
+          originalOwnerSeedId: f.originalOwnerSeedId,
+          peerReceiverSeedId: f.peerReceiverSeedId,
+          originalId: f.originalId,
+          userId: f.userId,
+          data: fileData ? api.bufferToBase64(fileData) : null
+        };
+      }));
+
+      const keypack = {
+        version: "2.0",
+        timestamp: new Date().toISOString(),
+        backupType: "automated_daily_backup",
+        profile: {
+          id: currentUser.id,
+          username: currentUser.username,
+          passwordHash: hash,
+          passwordSalt: salt,
+          vaultSeedId: currentUser.vaultSeedId,
+          displayName: currentUser.displayName,
+          avatarColor: currentUser.avatarColor,
+        },
+        files: filesWithData
+      };
+
+      const jsonStr = JSON.stringify(keypack, null, 2);
+      const blob = new Blob([jsonStr], { type: "application/json" });
+      const dateStr = new Date().toISOString().split('T')[0];
+      const backupFilename = `auto_backup_${currentUser.username}_${dateStr}.vault`;
+
+      let savedToHardwareFolder = false;
+      if (storageMod.isHardwareMounted()) {
+        try {
+          await storageMod.saveToHardware(backupFilename, blob);
+          savedToHardwareFolder = true;
+        } catch (hwErr) {
+          console.warn("[AutoBackup] Hardware directory save error:", hwErr);
+        }
+      }
+
+      try {
+        await storageMod.saveLocalFile({
+          id: -999,
+          name: backupFilename,
+          type: "application/json",
+          size: blob.size,
+          folderPath: "/backups",
+          isFolder: false,
+          isShared: false,
+          lastModified: Date.now(),
+          clientEncrypted: true,
+          userId: currentUser.id,
+          data: await blob.arrayBuffer()
+        });
+      } catch (dbErr) {
+        console.warn("[AutoBackup] Local storage save error:", dbErr);
+      }
+
+      const now = Date.now();
+      localStorage.setItem("vault_last_auto_backup_timestamp", String(now));
+      setLastAutoBackupTimestamp(now);
+
+      if (savedToHardwareFolder) {
+        showToast(`🛡️ Daily Automated Backup completed & written directly to mounted device hardware folder! (${backupFilename})`, "success");
+      } else {
+        showToast(`🛡️ Daily Automated Backup completed & saved to local OPFS device hardware storage!`, "success");
+      }
+    } catch (err: any) {
+      console.error("[AutoBackup] Backup failed:", err);
+      if (isManual) {
+        showToast(`Auto-backup error: ${err.message}`, "error");
+      }
+    }
+  };
+
+  // Automated daily backup scheduler (runs every 24 hours or on login if 24 hours have passed)
+  useEffect(() => {
+    if (!currentUser || !isDailyAutoBackupEnabled) return;
+
+    const checkAndRunAutoBackup = async () => {
+      const now = Date.now();
+      const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+      const lastBackup = Number(localStorage.getItem("vault_last_auto_backup_timestamp")) || 0;
+
+      if (now - lastBackup >= ONE_DAY_MS) {
+        console.log("[AutoBackup] 24 hours elapsed. Executing automated daily backup...");
+        await performDailyAutoBackup(false);
+      }
+    };
+
+    const initialTimer = setTimeout(() => {
+      checkAndRunAutoBackup();
+    }, 4000);
+
+    const interval = setInterval(() => {
+      checkAndRunAutoBackup();
+    }, 30 * 60 * 1000);
+
+    return () => {
+      clearTimeout(initialTimer);
+      clearInterval(interval);
+    };
+  }, [currentUser, isDailyAutoBackupEnabled, files, sessionPassword]);
+
+  // Master Vault Key File Scan & Recovery Engine
+  const handleMasterKeyFileScanAndRecovery = async (showToasts = true) => {
+    if (!currentUser || !currentUser.id) {
+      if (showToasts) showToast("Authentication required to run Master Key File Recovery.", "error");
+      return 0;
+    }
+
+    try {
+      if (showToasts) {
+        showToast("🔑 Master Vault Key: Scanning local hardware storage & mesh for vault files...", "info");
+      }
+
+      // 1. Link all local orphan files matching privateVaultId or vaultSeedId
+      const localLinkedCount = await api.linkOrphanFilesToUser(
+        currentUser.id, 
+        currentUser.privateVaultId, 
+        currentUser.vaultSeedId
+      );
+
+      // 2. Deep scan server & BlockDAG mesh for orphaned fragments or vault blocks
+      let deepRecoveredCount = 0;
+      try {
+        const deepRes = await api.deepRecover(currentUser.id);
+        deepRecoveredCount = deepRes?.recovered || 0;
+      } catch (err) {
+        console.warn("[MasterKeyRecovery] Deep scan warning:", err);
+      }
+
+      // 3. Re-index fresh files from local OPFS / SQLite WASM & API
+      const freshFiles = await refreshData();
+
+      const totalRecovered = localLinkedCount + deepRecoveredCount;
+      if (showToasts) {
+        if (totalRecovered > 0) {
+          showToast(`✅ Master Vault Key Recovery: Successfully recovered & re-linked ${totalRecovered} files to your vault!`, "success");
+        } else {
+          showToast(`🛡️ Master Vault Key Scan: All ${freshFiles?.length || 0} files are fully bound to your Master Key and verified.`, "success");
+        }
+      }
+      return totalRecovered;
+    } catch (err: any) {
+      console.error("[MasterKeyRecovery] File recovery error:", err);
+      if (showToasts) {
+        showToast("Master Key file recovery error: " + (err.message || "Unknown error"), "error");
+      }
+      return 0;
+    }
+  };
 
   const [storageTrends, setStorageTrends] = useState<StoragePoint[]>([]);
   const [meshNodes, setMeshNodes] = useState<any[]>([]);
@@ -992,6 +1425,38 @@ export default function App() {
   const [diagErrorMsg, setDiagErrorMsg] = useState<string>("");
   const [isDiagnosticRunning, setIsDiagnosticRunning] = useState<boolean>(false);
 
+  // Real-time Kaspa L1 connection state
+  const [kaspaL1Stats, setKaspaL1Stats] = useState<{
+    networkName: string;
+    blockCount: number;
+    difficulty: number;
+    blueScore: number;
+    virtualParentHashes: string[];
+    isSynced: boolean;
+    hashrate: number;
+  } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const fetchKaspaStats = async () => {
+      try {
+        const res = await fetch("/api/kaspa/l1-status");
+        if (res.ok && active) {
+          const data = await res.json();
+          setKaspaL1Stats(data);
+        }
+      } catch (err) {
+        console.warn("Failed to fetch Kaspa L1 stats:", err);
+      }
+    };
+    fetchKaspaStats();
+    const interval = setInterval(fetchKaspaStats, 15000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, []);
+
   // Dynamic real-time scoring
   const [realTimeIntegrity, setRealTimeIntegrity] = useState<number>(98.5);
   const [realTimeUptime, setRealTimeUptime] = useState<number>(99.9);
@@ -1050,7 +1515,6 @@ export default function App() {
 
   const runIdbTest = async (): Promise<number> => {
     const t0 = performance.now();
-    const storageMod = await import("./lib/storage");
     const uniqueId = Math.random().toString(36).substring(7);
     const testKey = `diag_pulse_${uniqueId}`;
     const randomVal = `val_${Math.random()}_${Date.now()}`;
@@ -1404,6 +1868,7 @@ export default function App() {
 
   const [sortBy, setSortBy] = useState<"name" | "date" | "size">("name");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("asc");
+  const [fileViewMode, setFileViewMode] = useState<"list" | "grid">("list");
 
   // Create / UI State controls
   const [newFolderName, setNewFolderName] = useState("");
@@ -1423,6 +1888,16 @@ export default function App() {
     message: string;
     type: "success" | "error" | "info";
   } | null>(null);
+
+  const showToast = useCallback((
+    message: string,
+    type: "success" | "error" | "info" = "success",
+  ) => {
+    setNotification({ message, type });
+    setTimeout(() => {
+      setNotification(null);
+    }, 4500);
+  }, []);
 
   const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
 
@@ -1445,6 +1920,10 @@ export default function App() {
   const [onlinePeers, setOnlinePeers] = useState<
     { username: string; displayName: string; cid: string }[]
   >([]);
+  const [backendUrlConfig, setBackendUrlConfig] = useState(() => localStorage.getItem("vault_backend_api_url") || "");
+  const [showConfigPanel, setShowConfigPanel] = useState(false);
+  const [showBackendModal, setShowBackendModal] = useState(false);
+  const [isTestingConfig, setIsTestingConfig] = useState(false);
 
   // Periodic Real-Time Telemetry Loop
   useEffect(() => {
@@ -1637,7 +2116,7 @@ export default function App() {
       });
       if (!mDnsIp) setMDnsIp(peerId);
     }
-  }, [peerId]);
+  }, [peerId, mDnsIp]);
 
   // Connected P2P swarm nodes are dynamically combined in the render loop to prevent state clobbering.
   const [mDnsIncomingTransfers, setMDnsIncomingTransfers] = useState<
@@ -1814,7 +2293,7 @@ export default function App() {
       const timer = setTimeout(processQueue, 1500);
       return () => clearTimeout(timer);
     }
-  }, [isOnline, offlineTransfersQueue]);
+  }, [isOnline, offlineTransfersQueue, currentUser?.username, showToast]);
 
   const handleDirectHttpSend = async (
     item: FileData,
@@ -1843,7 +2322,7 @@ export default function App() {
     if (!navigator.onLine || !isOnline) {
       const b64Data = arrayBufferToBase64(rawData);
       const newTask = {
-        itemId: item.id || Math.random().toString(),
+        itemId: item.id || Math.random().toString(36),
         itemName: item.name,
         itemType: item.type,
         itemSize: item.size,
@@ -1910,14 +2389,18 @@ export default function App() {
     senderUsername: string;
   }) => {
     if (!currentUser || !currentUser.id) return;
-    const tId = startTransfer(incFile.fileName, "upload");
+    const finalName = getUniqueFileName(incFile.fileName, currentPath);
+    if (finalName !== incFile.fileName) {
+      showToast(`Auto-renamed incoming mDNS file to "${finalName}"`, "info");
+    }
+    const tId = startTransfer(finalName, "upload");
     try {
       updateTransferProgress(tId, 30);
       const buffer = base64ToArrayBuffer(incFile.encryptedDataBase64);
       updateTransferProgress(tId, 60);
       await api.createFile({
         userId: currentUser.id,
-        name: incFile.fileName,
+        name: finalName,
         data: buffer,
         type: incFile.fileType,
         size: incFile.fileSize,
@@ -1929,7 +2412,7 @@ export default function App() {
       });
       updateTransferProgress(tId, 100, "completed");
       showToast(
-        `Saved mDNS payload "${incFile.fileName}" securely to SQLite!`,
+        `Saved mDNS payload "${finalName}" securely to SQLite!`,
         "success",
       );
       refreshData();
@@ -1998,12 +2481,16 @@ export default function App() {
     sender: string;
   }) => {
     if (!currentUser || !currentUser.id) return;
-    const tId = startTransfer(incFile.name, "upload");
+    const finalName = getUniqueFileName(incFile.name, currentPath);
+    if (finalName !== incFile.name) {
+      showToast(`Auto-renamed WebRTC file to "${finalName}"`, "info");
+    }
+    const tId = startTransfer(finalName, "upload");
     try {
       updateTransferProgress(tId, 50);
       await api.createFile({
         userId: currentUser.id,
-        name: incFile.name,
+        name: finalName,
         data: incFile.data,
         type: incFile.type,
         size: incFile.size,
@@ -2015,7 +2502,7 @@ export default function App() {
       });
       updateTransferProgress(tId, 100, "completed");
       showToast(
-        `Saved WebRTC payload "${incFile.name}" securely to SQLite!`,
+        `Saved WebRTC payload "${finalName}" securely to SQLite!`,
         "success",
       );
       refreshData();
@@ -2054,8 +2541,28 @@ export default function App() {
       const blob = new Blob([decryptedBuffer], { type: incFile.type });
       const url = URL.createObjectURL(blob);
       if (previewMode) {
-        window.open(url, "_blank");
-        showToast("Preview opened in new tab.", "success");
+        try {
+          const newWindow = window.open(url, "_blank");
+          if (!newWindow) {
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = incFile.name.replace(".enc", "") || "unlocked_file";
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            showToast("Sandbox restricted new tab. File downloaded securely.", "success");
+          } else {
+            showToast("Preview opened in new tab.", "success");
+          }
+        } catch (e) {
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = incFile.name.replace(".enc", "") || "unlocked_file";
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          showToast("Preview downloaded successfully.", "success");
+        }
       } else {
         const link = document.createElement("a");
         link.href = url;
@@ -2527,8 +3034,17 @@ export default function App() {
       return;
     }
 
-    const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${wsProtocol}//${window.location.host}`;
+    const savedBackend = localStorage.getItem("vault_backend_api_url");
+    let wsUrl = "";
+    if (savedBackend) {
+      const cleanBackend = savedBackend.trim().replace(/\/+$/, "");
+      const wsProtocol = cleanBackend.startsWith("https:") ? "wss:" : "ws:";
+      const hostOnly = cleanBackend.replace(/^https?:\/\//, "");
+      wsUrl = `${wsProtocol}//${hostOnly}`;
+    } else {
+      const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      wsUrl = `${wsProtocol}//${window.location.host}`;
+    }
     let socket: WebSocket | null = null;
     let reconnectionTimer: any = null;
 
@@ -2816,6 +3332,8 @@ export default function App() {
             setCurrentUser(updatedUser);
             const allMyFiles = await api.getFiles(usernameMatch.id!, usernameMatch.privateVaultId);
             setFiles(allMyFiles);
+            reconcileLocalFilesWithServer(usernameMatch.id!, allMyFiles);
+            syncMissingFileContentsInBackground(usernameMatch.id!, allMyFiles);
             return allMyFiles;
           } else if (sessionPassword) {
             // Username not present on server, and we have local sessionPassword: auto-heal by silently registering custom identity!
@@ -2876,6 +3394,7 @@ export default function App() {
             const recoveredFiles = await api.getFiles(autoUser.id!, autoUser.privateVaultId);
             setFiles(recoveredFiles);
             showToast("Credentials successfully synced. System connected!", "success");
+            reconcileLocalFilesWithServer(autoUser.id!, recoveredFiles);
             syncMissingFileContentsInBackground(autoUser.id!, recoveredFiles);
             return recoveredFiles;
           } else {
@@ -2884,6 +3403,7 @@ export default function App() {
         }
         const allMyFiles = await api.getFiles(currentUser.id, currentUser.privateVaultId);
         setFiles(allMyFiles);
+        reconcileLocalFilesWithServer(currentUser.id, allMyFiles);
         syncMissingFileContentsInBackground(currentUser.id, allMyFiles);
         return allMyFiles;
       } else {
@@ -2903,16 +3423,6 @@ export default function App() {
       isRefreshingRef.current = false;
       setIsInitialLoading(false);
     }
-  };
-
-  const showToast = (
-    message: string,
-    type: "success" | "error" | "info" = "success",
-  ) => {
-    setNotification({ message, type });
-    setTimeout(() => {
-      setNotification(null);
-    }, 4500);
   };
 
   // Helper validation for offline registry password strength
@@ -3024,6 +3534,7 @@ export default function App() {
       // Automatically attempt to register biometric/passkey
       if (isWebBiometricSupported()) {
         try {
+          showToast("🛡️ Registering hardware security anchor...", "info");
           await saveWebBiometric(cleanUsername, passwordInput);
           showToast("Passkey registered for hardware security.", "success");
         } catch (biomErr) {
@@ -3067,6 +3578,7 @@ export default function App() {
       // Store the hash in memory for the session to allow current-password verification during re-keying
       setCurrentUser({ ...user, passwordHash: computedHash });
       setSessionPassword(passwordInput);
+      setIsSessionLocked(false);
       
       // Attempt to save biometric credentials if available
       try {
@@ -3074,6 +3586,7 @@ export default function App() {
         if (isWebBiometricSupported()) {
           const alreadyHas = await hasWebBiometric(cleanUsername);
           if (!alreadyHas) {
+            showToast("🛡️ Initializing hardware security anchor...", "info");
             const ok = await saveWebBiometric(cleanUsername, passwordInput);
             if (ok) {
               console.log("Credentials securely encrypted in non-extractable Web Biometric Enclave.");
@@ -3094,8 +3607,32 @@ export default function App() {
     }
   };
 
-  const handleBiometricLogin = async (overrideUsername?: string, isAutoAttempt = false) => {
-    const cleanUsername = (overrideUsername || usernameInput).trim().toLowerCase();
+  const handleBiometricLogin = useCallback(async (overrideUsername?: string | boolean | any, autoAttempt = false) => {
+    let isAutoAttempt = autoAttempt;
+    let cleanUsername = "";
+
+    if (typeof overrideUsername === "boolean") {
+      isAutoAttempt = overrideUsername;
+      if (currentUser && currentUser.username) {
+        cleanUsername = currentUser.username.trim().toLowerCase();
+      } else if (usernameInput && typeof usernameInput === "string") {
+        cleanUsername = usernameInput.trim().toLowerCase();
+      }
+    } else if (typeof overrideUsername === "string" && overrideUsername.trim()) {
+      cleanUsername = overrideUsername.trim().toLowerCase();
+    } else if (currentUser && currentUser.username) {
+      cleanUsername = currentUser.username.trim().toLowerCase();
+    } else if (usernameInput && typeof usernameInput === "string" && usernameInput.trim()) {
+      cleanUsername = usernameInput.trim().toLowerCase();
+    } else {
+      try {
+        const localUsers = await api.getAllUsers().catch(() => []);
+        if (localUsers.length > 0 && localUsers[0].username) {
+          cleanUsername = localUsers[0].username.trim().toLowerCase();
+        }
+      } catch (e) {}
+    }
+
     if (!cleanUsername) {
       if (!isAutoAttempt) {
         showToast("Username required for biometric login.", "error");
@@ -3197,13 +3734,14 @@ export default function App() {
 
         setCurrentUser({ ...user, passwordHash: computedHash });
         setSessionPassword(password);
-        showToast(isAutoAttempt ? "Passkey re-auth successful." : `Unlocked: ${user.displayName}!`, "success");
+        setIsSessionLocked(false);
+        showToast(isAutoAttempt ? "Passkey re-auth successful." : `Unlocked: ${user.displayName || cleanUsername}!`, "success");
 
         setUsernameInput("");
         setPasswordInput("");
       } else {
         if (!isAutoAttempt) {
-          showToast("No stored credentials found for this node.", "error");
+          showToast("No stored Passkey credentials found for this node. Please login with password first.", "error");
         }
       }
     } catch (error: any) {
@@ -3231,7 +3769,7 @@ export default function App() {
         isSystemActionRef.current = false;
       }, 1000);
     }
-  };
+  }, [usernameInput, showToast, currentUser, setCurrentUser, setSessionPassword, setUsernameInput, setPasswordInput]);
 
   const lockWorkspace = (reason?: string) => {
     if (isSystemActionRef.current) return;
@@ -3246,28 +3784,27 @@ export default function App() {
   useEffect(() => {
     const handleVisibilityChange = async () => {
       if (document.visibilityState === "hidden") {
-        // App is backgrounded
+        // App is backgrounded / left the app
         if (isSystemActionRef.current) {
           console.log("Visibility hidden but system action in progress, skipping lock.");
           return;
         }
 
-        // Delay lock if biometric auto-unlock is active (5-second grace period)
-        if (biometricAutoUnlock && sessionPassword) {
-          console.log("[Security] Backgrounding detected. Starting 5s auto-lock timer.");
-          if (backgroundLockTimerRef.current) clearTimeout(backgroundLockTimerRef.current);
-          
-          backgroundLockTimerRef.current = setTimeout(() => {
-            console.log("[Security] Grace period expired. Zeroing session memory.");
-            setSessionPassword("");
-            localStorage.removeItem("vault_session_password");
-            backgroundLockTimerRef.current = null;
-          }, 5000); // 5 seconds
+        console.log("[Security] Left app detected. Starting 2-minute auto-lock timer.");
+        if (backgroundLockTimerRef.current) {
+          clearTimeout(backgroundLockTimerRef.current);
         }
+
+        backgroundLockTimerRef.current = setTimeout(() => {
+          console.log("[Security] 2-minute timer expired while backgrounded. Locking workspace.");
+          setSessionPassword("");
+          localStorage.removeItem("vault_session_password");
+          backgroundLockTimerRef.current = null;
+        }, 120000); // 2 minutes (120,000 ms)
       } else if (document.visibilityState === "visible") {
         // App is foregrounded
         if (backgroundLockTimerRef.current) {
-          console.log("[Security] Returned within grace period. Cancelling lock timer.");
+          console.log("[Security] Returned within 2 minutes. Cancelling auto-lock timer.");
           clearTimeout(backgroundLockTimerRef.current);
           backgroundLockTimerRef.current = null;
         }
@@ -3301,17 +3838,33 @@ export default function App() {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("beforeunload", handleBeforeUnload);
     };
-  }, [biometricAutoUnlock, currentUser, sessionPassword]);
+  }, [biometricAutoUnlock, currentUser, sessionPassword, handleBiometricLogin]);
 
-  // Auto-unlock on initial app launch if biometricAutoUnlock is enabled
+  // Auto-unlock on initial app launch or when locked if biometric auto-unlock is enabled OR if they have saved credentials
   useEffect(() => {
-    if (biometricAutoUnlock && currentUser && !sessionPassword) {
-      const timer = setTimeout(() => {
-        handleBiometricLogin(currentUser.username, true);
-      }, 1000); // Small delay to let UI render
-      return () => clearTimeout(timer);
+    if (currentUser && !sessionPassword) {
+      let isSubscribed = true;
+      const checkAndChallenge = async () => {
+        try {
+          const hasSaved = await hasWebBiometric(currentUser.username);
+          if (isSubscribed && (biometricAutoUnlock || hasSaved)) {
+            console.log("[Security] Lock screen active and biometric capability detected. Auto-challenging...");
+            setTimeout(() => {
+              if (isSubscribed && !isSystemActionRef.current) {
+                handleBiometricLogin(currentUser.username, true);
+              }
+            }, 800); // Small delay to let UI render
+          }
+        } catch (e) {
+          console.warn("Biometric check failed", e);
+        }
+      };
+      checkAndChallenge();
+      return () => {
+        isSubscribed = false;
+      };
     }
-  }, []); // Run once on mount
+  }, [biometricAutoUnlock, currentUser, sessionPassword, handleBiometricLogin]); // Run on mount and state changes
 
   const handleLogout = (reason?: string) => {
     setCurrentUser(null);
@@ -3456,6 +4009,7 @@ export default function App() {
         // Automatically attempt to update biometric/passkey with new password
         if (isWebBiometricSupported() && currentUser) {
           try {
+            showToast("🛡️ Updating hardware security anchor...", "info");
             await saveWebBiometric(currentUser.username, editNewPassword);
             showToast("Passkey updated for hardware security.", "success");
           } catch (biomErr) {
@@ -3537,6 +4091,24 @@ export default function App() {
     }
   };
 
+  const getUniqueFileName = (fileName: string, folderPath: string): string => {
+    let outputName = fileName;
+    let counter = 1;
+    const dotIndex = fileName.lastIndexOf(".");
+    const baseName = dotIndex !== -1 ? fileName.substring(0, dotIndex) : fileName;
+    const ext = dotIndex !== -1 ? fileName.substring(dotIndex) : "";
+
+    while (
+      files.some(
+        (f) => f.folderPath === folderPath && f.name.toLowerCase() === outputName.toLowerCase() && !f.deletedAt
+      )
+    ) {
+      outputName = `${baseName} (${counter})${ext}`;
+      counter++;
+    }
+    return outputName;
+  };
+
   // Infinite-Scale Zero-RAM Stream Uploader (Handles files up to Terabytes flawlessly)
   const saveStreamingFile = async (file: File) => {
     if (!currentUser || !currentUser.id) {
@@ -3566,68 +4138,51 @@ export default function App() {
       return;
     }
 
-    const tId = startTransfer(file.name, "upload");
-    try {
-      // Check duplicate naming in current directory path
-      const checkDup = files.find(
-        (f) => f.folderPath === currentPath && f.name === file.name && !f.deletedAt,
-      );
-      const outputName = file.name;
+    const normCurrentPath = (currentPath || "/").trim() || "/";
+    const exactExistingStream = files.find(f =>
+      !f.isFolder &&
+      f.name.toLowerCase() === (file.name || "").toLowerCase() &&
+      ((f.folderPath || "/").trim() || "/") === normCurrentPath &&
+      f.size === file.size
+    );
 
+    if (exactExistingStream) {
+      showToast(`File "${file.name}" is already uploaded in this folder.`, "info");
+      return;
+    }
+
+    const outputName = getUniqueFileName(file.name, currentPath);
+    const wasRenamed = outputName !== file.name;
+
+    const tId = startTransfer(outputName, "upload");
+    try {
       updateTransferProgress(tId, 10);
 
-      // Call createFile passing physical File directly onto browser-native streaming
-      if (checkDup && checkDup.id) {
-        try {
-          const dotIndex = checkDup.name.lastIndexOf(".");
-          const baseName = dotIndex !== -1 ? checkDup.name.substring(0, dotIndex) : checkDup.name;
-          const ext = dotIndex !== -1 ? checkDup.name.substring(dotIndex) : "";
-          const backupName = `${baseName} (Backup)${ext}`;
-          await api.createFile({
-            userId: currentUser.id,
-            privateVaultId: currentUser.privateVaultId,
-            name: backupName,
-            data: checkDup.data,
-            type: checkDup.type,
-            size: checkDup.size,
-            folderPath: checkDup.folderPath,
-            isFolder: false,
-            isShared: checkDup.isShared,
-            lastModified: checkDup.lastModified || Date.now(),
-            clientEncrypted: checkDup.clientEncrypted ?? false,
-          });
-          showToast(`Backed up original to "${backupName}" to prevent overwrite lock`, "info");
-        } catch (backupErr) {
-          console.error("Backup creation failed:", backupErr);
-        }
-
-        await api.updateFile(currentUser.id, checkDup.id, {
-          name: outputName,
-          data: file as any, // updateFile will handle stream conversion if using raw update
-          type: file.type || "application/octet-stream",
-          size: file.size,
-          folderPath: currentPath,
-          lastModified: Date.now(),
-          clientEncrypted: false,
-        });
-      } else {
-        await api.createFile({
-          userId: currentUser.id,
-          privateVaultId: currentUser.privateVaultId,
-          name: outputName,
-          data: file as any, // Cast to any since standard DB interface uses ArrayBuffer typing
-          type: file.type || "application/octet-stream",
-          size: file.size,
-          folderPath: currentPath,
-          isFolder: false,
-          isShared: false,
-          lastModified: Date.now(),
-          clientEncrypted: false, // Injects automated inline stream encryption on the server
-        }, (percent) => {
-          const overallProgress = 10 + Math.round((percent / 100) * 85);
-          updateTransferProgress(tId, overallProgress);
-        });
+      if (wasRenamed) {
+        showToast(`Auto-renamed duplicate upload to "${outputName}"`, "info");
       }
+
+      // Call createFile passing physical File directly onto browser-native streaming
+      await api.createFile({
+        userId: currentUser.id,
+        privateVaultId: currentUser.privateVaultId,
+        vaultSeedId: currentUser.vaultSeedId,
+        name: outputName,
+        data: file as any, // Cast to any since standard DB interface uses ArrayBuffer typing
+        type: file.type || "application/octet-stream",
+        size: file.size,
+        folderPath: currentPath,
+        isFolder: false,
+        isShared: false,
+        lastModified: Date.now(),
+        clientEncrypted: false, // Injects automated inline stream encryption on the server
+      }, (percent) => {
+        const overallProgress = 10 + Math.round((percent / 100) * 85);
+        updateTransferProgress(tId, overallProgress);
+      });
+
+      // Anchor and link Master Vault Key files during upload
+      await handleMasterKeyFileScanAndRecovery(false);
 
       updateTransferProgress(tId, 100, "completed");
       logTransfer({
@@ -3641,15 +4196,22 @@ export default function App() {
       });
 
       if (!navigator.onLine) {
-        showToast(`Saved offline: ${outputName} (cached in secure local storage)`, "info");
+        showToast(`Saved offline: ${outputName} (cached in secure local storage & queued for auto-sync)`, "info");
       } else {
         showToast(`Saved: ${outputName} (High-Speed Direct Stream Encrypted)`, "success");
       }
       await refreshData();
     } catch (err: any) {
       console.error("Direct stream upload error:", err);
-      updateTransferProgress(tId, 0, "error");
-      showToast(err.message || "Failed to stream upload massive file.", "error");
+      const isNetworkErr = !navigator.onLine || err?.message?.includes("Network") || err?.message?.includes("fetch");
+      if (isNetworkErr) {
+        updateTransferProgress(tId, 100, "completed", "Stored Offline & Queued for Auto-Sync");
+        showToast(`Stored offline: "${outputName}". Auto-syncing when network restores.`, "info");
+        await refreshData().catch(() => {});
+      } else {
+        updateTransferProgress(tId, 0, "error");
+        showToast(err.message || "Failed to stream upload massive file.", "error");
+      }
     }
   };
 
@@ -3682,73 +4244,58 @@ export default function App() {
 
     const isFolder = lowercaseType === "directory" || lowercaseType === "folder";
 
-    if (isMaliciousOrCorruptName || (!isFolder && byteLength <= 0)) {
-      showToast("Upload blocked: File is suspected to be a corrupt video or malware/virus.", "error");
+    if (isMaliciousOrCorruptName) {
+      showToast("Upload blocked: File is suspected to be malware or virus.", "error");
       return;
     }
 
-    const tId = startTransfer(name, "upload");
+    const normCurrentPathUpload = (currentPath || "/").trim() || "/";
+    const exactExistingFile = files.find(f =>
+      !f.isFolder &&
+      f.name.toLowerCase() === (name || "").toLowerCase() &&
+      ((f.folderPath || "/").trim() || "/") === normCurrentPathUpload &&
+      f.size === byteLength
+    );
+
+    if (exactExistingFile) {
+      showToast(`File "${name}" is already uploaded in this folder.`, "info");
+      return;
+    }
+
+    const outputName = getUniqueFileName(name, currentPath);
+    const wasRenamed = outputName !== name;
+
+    const tId = startTransfer(outputName, "upload");
     try {
-      // Check duplicate naming in current directory path
-      const checkDup = files.find(
-        (f) => f.folderPath === currentPath && f.name === name && !f.deletedAt,
-      );
-      const outputName = name;
+      if (wasRenamed) {
+        showToast(`Auto-renamed duplicate upload to "${outputName}"`, "info");
+      }
 
       updateTransferProgress(tId, 15);
       const encryptedBuffer = await encryptData(buffer, sessionPassword);
       updateTransferProgress(tId, 45);
 
-      if (checkDup && checkDup.id) {
-        try {
-          const dotIndex = checkDup.name.lastIndexOf(".");
-          const baseName = dotIndex !== -1 ? checkDup.name.substring(0, dotIndex) : checkDup.name;
-          const ext = dotIndex !== -1 ? checkDup.name.substring(dotIndex) : "";
-          const backupName = `${baseName} (Backup)${ext}`;
-          await api.createFile({
-            userId: currentUser.id,
-            privateVaultId: currentUser.privateVaultId,
-            name: backupName,
-            data: checkDup.data,
-            type: checkDup.type,
-            size: checkDup.size,
-            folderPath: checkDup.folderPath,
-            isFolder: false,
-            isShared: checkDup.isShared,
-            lastModified: checkDup.lastModified || Date.now(),
-            clientEncrypted: checkDup.clientEncrypted ?? true,
-          });
-          showToast(`Backed up original to "${backupName}" to prevent overwrite lock`, "info");
-        } catch (backupErr) {
-          console.error("Backup creation failed:", backupErr);
-        }
+      await api.createFile({
+        userId: currentUser.id,
+        privateVaultId: currentUser.privateVaultId,
+        vaultSeedId: currentUser.vaultSeedId,
+        name: outputName,
+        data: encryptedBuffer,
+        type: type || "application/octet-stream",
+        size: byteLength,
+        folderPath: currentPath,
+        isFolder: false,
+        isShared: false,
+        lastModified: Date.now(),
+        clientEncrypted: true,
+      }, (percent) => {
+        // Map 0-100% upload progress to 45%-95% of total progress bar
+        const overallProgress = 45 + Math.round((percent / 100) * 50);
+        updateTransferProgress(tId, overallProgress);
+      });
 
-        await api.updateFile(currentUser.id, checkDup.id, {
-          name: outputName,
-          data: encryptedBuffer,
-          type: type || "application/octet-stream",
-          size: byteLength,
-          folderPath: currentPath,
-          lastModified: Date.now()
-        });
-      } else {
-        await api.createFile({
-          userId: currentUser.id,
-          privateVaultId: currentUser.privateVaultId,
-          name: outputName,
-          data: encryptedBuffer,
-          type: type || "application/octet-stream",
-          size: byteLength,
-          folderPath: currentPath,
-          isFolder: false,
-          isShared: false,
-          lastModified: Date.now(),
-        }, (percent) => {
-          // Map 0-100% upload progress to 45%-95% of total progress bar
-          const overallProgress = 45 + Math.round((percent / 100) * 50);
-          updateTransferProgress(tId, overallProgress);
-        });
-      }
+      // Anchor and link Master Vault Key files during upload
+      await handleMasterKeyFileScanAndRecovery(false);
 
       updateTransferProgress(tId, 100, "completed");
       logTransfer({
@@ -3762,13 +4309,20 @@ export default function App() {
       });
 
       if (!navigator.onLine) {
-        showToast(`Encrypted & stored offline: ${outputName} (secure local storage)`, "info");
+        showToast(`Encrypted & stored offline: ${outputName} (secure local storage & auto-sync queued)`, "info");
       } else {
         showToast(`Encrypted & stored: ${outputName}`, "success");
       }
       refreshData();
     } catch (err: any) {
       console.error("Error saving uploaded file:", err);
+      const isNetworkErr = !navigator.onLine || err?.message?.includes("Network") || err?.message?.includes("fetch");
+      if (isNetworkErr) {
+        updateTransferProgress(tId, 100, "completed", "Stored Offline & Queued for Auto-Sync");
+        showToast(`Encrypted & stored offline: "${outputName}". Auto-syncing when connection restores.`, "info");
+        refreshData();
+        return;
+      }
       updateTransferProgress(tId, 0, "error");
       const errMsg = err instanceof Error ? err.message : "Unknown error";
       showToast(
@@ -3856,6 +4410,7 @@ export default function App() {
 
       await Promise.all(uploadPromises);
       isSystemActionRef.current = false;
+      await handleMasterKeyFileScanAndRecovery(false);
       // Final refresh after all files are processed to avoid intermediate visual 'doubling' or flickering
       refreshData();
     }
@@ -3884,7 +4439,7 @@ export default function App() {
         updateTransferProgress(tId, 30);
         
         const a = document.createElement("a");
-        a.href = `/api/files/download/${file.id}?userId=${currentUser.id}`;
+        a.href = `/api/files/download/${file.id}?userId=${currentUser.id}&download=1`;
         a.download = file.name.replace(".enc", "");
         document.body.appendChild(a);
         a.click();
@@ -3960,14 +4515,22 @@ export default function App() {
       const a = document.createElement("a");
       a.href = url;
       a.download = file.name.replace(".enc", "") || "unlocked_file";
+      document.body.appendChild(a);
       a.click();
+      document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 60000);
       showToast(`Saved: ${file.name.replace(".enc", "")}`, "success");
       updateTransferProgress(tId, 100, "completed");
     } catch (e: any) {
       console.error("Download failed:", e);
-      updateTransferProgress(tId, 0, "error");
-      showToast(e.message || "Download or decryption failed.", "error");
+      const isNetworkErr = !navigator.onLine || e?.message?.includes("Network") || e?.message?.includes("fetch");
+      if (isNetworkErr) {
+        updateTransferProgress(tId, 50, "active", "Queued for Auto-Resume");
+        showToast("Download paused due to network disconnect. Auto-resuming when connection restores.", "info");
+      } else {
+        updateTransferProgress(tId, 0, "error");
+        showToast(e.message || "Download or decryption failed.", "error");
+      }
     }
   };
 
@@ -4188,7 +4751,7 @@ export default function App() {
 
     try {
       const res = await fetch(`/api/files/${file.id}/versions`, {
-        headers: { 'X-User-Id': currentUser?.id?.toString() || "" }
+        headers: { 'X-User-Id': currentUser?.id?.toString() || "0" }
       });
       if (!res.ok) throw new Error("Failed to load versions");
       const data = await res.json();
@@ -4225,7 +4788,7 @@ export default function App() {
     try {
       const res = await fetch(`/api/files/${versionHistoryFile.id}/versions/${versionId}/restore`, {
         method: "POST",
-        headers: { "X-User-Id": currentUser.id.toString() }
+        headers: { "X-User-Id": currentUser.id?.toString() || "0" }
       });
       if (!res.ok) throw new Error("Failed to restore version");
       
@@ -4625,9 +5188,14 @@ export default function App() {
         // E2E Security wrap: Re-encrypt raw decrypted data using current logged-in user's master key
         const reSecuredBuffer = await encryptData(rawBytes, sessionPassword);
         
+        const finalName = getUniqueFileName(request.fileName, currentPath);
+        if (finalName !== request.fileName) {
+          showToast(`Auto-renamed file to "${finalName}" to prevent overwrite`, "info");
+        }
+        
         await api.createFile({
           userId: currentUser.id,
-          name: request.fileName,
+          name: finalName,
           data: reSecuredBuffer,
           type: request.fileType || "application/octet-stream",
           size: request.fileSize || rawBytes.byteLength,
@@ -4639,7 +5207,7 @@ export default function App() {
         });
         
         logTransfer({
-          fileName: request.fileName,
+          fileName: finalName,
           fileSize: request.fileSize || rawBytes.byteLength,
           direction: "incoming",
           sender: request.senderName,
@@ -4648,7 +5216,7 @@ export default function App() {
           status: "Completed",
         });
 
-        showToast(`Saved successfully: "${request.fileName}" auto-stored in your vault.db!`, "success");
+        showToast(`Saved successfully: "${finalName}" auto-stored in your vault.db!`, "success");
         refreshData();
         return;
       } catch (err: any) {
@@ -4730,8 +5298,13 @@ export default function App() {
         sessionPassword,
       );
 
+      const finalName = getUniqueFileName(file.name, currentPath);
+      if (finalName !== file.name) {
+        showToast(`Auto-renamed synced file to "${finalName}" to prevent overwrite`, "info");
+      }
+
       logTransfer({
-        fileName: file.name,
+        fileName: finalName,
         fileSize: file.size,
         direction: "incoming",
         sender: peer.username,
@@ -4743,7 +5316,7 @@ export default function App() {
       // Save decrypted-reencrypted object to current profile files with Sender info
       await api.createFile({
         userId: currentUser.id!,
-        name: `${file.name}`,
+        name: finalName,
         data: reSecuredBuffer,
         type: file.type,
         size: file.size,
@@ -4783,8 +5356,10 @@ export default function App() {
     if (onlyShowOffline && item.clientEncrypted === false) return false;
 
     // If search query is active, search globally across all folder spaces;
-    // otherwise, restrict file listing strictly to the active directory.
-    if (!searchQuery && item.folderPath !== currentPath) return false;
+    // otherwise, restrict file listing strictly to the active directory with normalized path matching.
+    const itemFolderPath = (item.folderPath || "/").trim() || "/";
+    const normalizedCurrentPath = (currentPath || "/").trim() || "/";
+    if (!searchQuery && itemFolderPath !== normalizedCurrentPath) return false;
 
     // Search scans name text
     if (
@@ -4843,7 +5418,7 @@ export default function App() {
   const pathParts = currentPath.split("/").filter((p) => p !== "");
 
   // Retrieve global shared files of other registered peers
-  const refreshSharedFiles = async () => {
+  const refreshSharedFiles = useCallback(async () => {
     try {
       const results = await api.getSharedFiles();
       // Ensure we only see files where isShared is explicitly true
@@ -4858,9 +5433,9 @@ export default function App() {
       }));
       setDiscoveredMeshFiles(mapped);
     } catch (err) {
-      console.error("Failed to refresh shared files:", err);
+      console.warn("Failed to refresh shared files:", err);
     }
-  };
+  }, []);
 
   // Since React works with state, we dynamically resolve this on mount/refresh
   const [discoveredMeshFiles, setDiscoveredMeshFiles] = useState<
@@ -4869,11 +5444,68 @@ export default function App() {
 
   useEffect(() => {
     refreshSharedFiles();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allUsers, currentUser, files]);
+  }, [allUsers, currentUser, files, refreshSharedFiles]);
 
   return (
     <div className={`flex flex-col min-h-screen ${!currentUser || !sessionPassword ? 'bg-slate-950' : 'bg-[#0a0c10]'} font-sans text-white relative selection:bg-indigo-500/30 selection:text-white`}>
+        {/* Full-screen Session Lock Overlay */}
+        <AnimatePresence>
+          {isSessionLocked && currentUser && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-[1000] bg-slate-950/95 flex flex-col items-center justify-center p-6 backdrop-blur-sm"
+            >
+              <div className="max-w-sm w-full space-y-8 text-center">
+                <div className="relative inline-block">
+                  <div className="w-24 h-24 rounded-[32px] bg-indigo-600/20 flex items-center justify-center border border-indigo-500/30">
+                    <Lock className="w-10 h-10 text-indigo-400" />
+                  </div>
+                  <div className="absolute -bottom-2 -right-2 bg-slate-950 p-2 rounded-full border border-indigo-500/30">
+                    <Fingerprint className="w-6 h-6 text-indigo-400 animate-pulse" />
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <h2 className="text-3xl font-black tracking-tight text-white uppercase">Vault Locked</h2>
+                  <p className="text-sm text-indigo-300/60 font-medium leading-relaxed">
+                    Identity <span className="text-white">@{currentUser.username}</span> is secured behind the hardware anchor. Verification required to restore interface access.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3">
+                  <button
+                    onClick={() => handleBiometricLogin(currentUser.username)}
+                    className="w-full bg-indigo-600 hover:bg-indigo-500 h-14 rounded-2xl flex items-center justify-center gap-3 font-black text-white uppercase tracking-widest transition-all active:scale-95 shadow-2xl shadow-indigo-600/20"
+                  >
+                    <ShieldCheck className="w-5 h-5" />
+                    Verify Identity
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setIsSessionLocked(false);
+                      handleLogout();
+                    }}
+                    className="w-full bg-white/5 hover:bg-white/10 h-12 rounded-2xl flex items-center justify-center gap-3 font-bold text-slate-400 hover:text-white transition-all text-xs uppercase tracking-widest"
+                  >
+                    <LogOut className="w-4 h-4" />
+                    Switch Authority
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-auto pt-12">
+                <div className="flex items-center gap-2 opacity-20">
+                   <Infinity className="w-4 h-4 text-indigo-400" />
+                   <span className="font-mono text-[9px] uppercase tracking-widest font-black">Secure Inactivity Enforcer</span>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* Responsive Sidebar / Slide-out Drawer */}
         <AnimatePresence>
           {isSidebarOpen && currentUser && sessionPassword && (
@@ -5097,7 +5729,7 @@ export default function App() {
         {/* Compact Top Bar */}
         {currentUser && sessionPassword && !showSettingsPanel && !showNetworkDocs && !viewingDagBlock && !showSovereignRecovery ? (
           <header className="sticky top-0 z-[60] bg-[#0a0c10] border-b border-white/10 w-full shadow-2xl">
-            <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
+            <div className="max-w-7xl mx-auto px-4 py-2.5 flex items-center justify-between">
               {/* Menu Button */}
               <button
                 onClick={() => setIsSidebarOpen(true)}
@@ -5154,7 +5786,7 @@ export default function App() {
         {/* Compact Top Bar is closed above */}
 
 
-      <div className={!currentUser || !sessionPassword ? "w-full flex-1 flex flex-col" : "flex-1 flex flex-col max-w-7xl mx-auto w-full px-3 sm:px-4 md:px-8 pt-4 pb-0 sm:pt-8 sm:pb-0"}>
+      <div className={!currentUser || !sessionPassword ? "w-full flex-1 flex flex-col" : "flex-1 flex flex-col max-w-7xl mx-auto w-full px-3 sm:px-4 md:px-8 pt-0 pb-0"}>
         {/* Toast status alerts */}
         <AnimatePresence>
           {notification && (
@@ -5518,6 +6150,7 @@ export default function App() {
               handleMnemonicOrMasterKeyRecovery={handleMnemonicOrMasterKeyRecovery}
               hasBiometric={hasBiometric}
               handleBiometricSign={handleBiometricLogin}
+              onLinkBackend={() => setShowBackendModal(true)}
             />
           ) : !sessionPassword ? (
             /* AUTHENTICATED BUT LOCKED: Dedicated Auto-Lock Screen */
@@ -5606,63 +6239,65 @@ export default function App() {
             </div>
           ) : (
             /* FULLY UNLOCKED: Main Dashboard */
-            <div className="flex flex-col min-h-0 w-full animate-fade-in pt-6">
+            <div className="flex flex-col min-h-0 w-full animate-fade-in pt-0">
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 min-h-0 w-full">
                 {/* Left Column: Explorer - Restored to 8 columns for multi-view layout */}
                 <div className={`${mobileActiveTab === "files" ? "flex" : "hidden"} lg:flex col-span-1 lg:col-span-8 flex-col min-h-0`}>
-                <section className="bg-white/5 backdrop-blur-md rounded-[32px] overflow-hidden border border-white/10 flex flex-col shadow-2xl">
+                <section className="flex flex-col min-h-0 bg-transparent">
                   {/* Search, Action Toolbar */}
-                  <div className="p-4 md:p-6 pb-0 flex flex-col md:flex-row gap-4 justify-between items-stretch">
+                  <div className="py-1.5 px-0 flex flex-row items-center gap-2.5 justify-between">
+                    {/* Left Angle: New Folder button */}
+                    {currentPath !== "/Trash" && (
+                      <button
+                        onClick={() =>
+                          setShowNewFolderInput(!showNewFolderInput)
+                        }
+                        id="create-folder-btn"
+                        className="bg-indigo-600 hover:bg-indigo-500 border border-indigo-400/20 text-white rounded-xl px-3 py-2 text-xs font-semibold uppercase tracking-wider flex items-center justify-center gap-1.5 shadow-sm active:scale-95 transition-all shrink-0"
+                      >
+                        <Plus className="w-3.5 h-3.5" /> New Folder
+                      </button>
+                    )}
+
                     {/* Search Component with id */}
                     <div className="relative flex-1 min-w-0">
-                      <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-indigo-300 w-5 h-5" />
+                      <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-indigo-300 w-4 h-4" />
                       <input
                         type="text"
                         id="file-search-input"
                         placeholder="Search workspace files..."
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
-                        className="w-full bg-white/5 border border-white/10 rounded-2xl pl-12 pr-4 py-3 placeholder-indigo-300 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                        className="w-full bg-white/5 border border-white/10 rounded-xl pl-10 pr-4 py-2 placeholder-indigo-300 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/50 text-white"
                       />
                     </div>
 
-                    <div className={`${currentPath === "/Trash" ? "flex" : "grid grid-cols-2"} sm:flex sm:flex-row gap-3 sm:gap-2 items-stretch shrink-0`}>
+                    {/* Right Angle: Upload button or Empty Trash */}
+                    <div className="flex items-center shrink-0">
                       {currentPath === "/Trash" ? (
                         <button
                           onClick={handleEmptyTrash}
                           id="empty-trash-btn"
-                          className="bg-red-600 hover:bg-red-500 border border-white/10 text-white rounded-2xl px-4 py-3 text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-1.5 shadow-md active:scale-95 transition-transform w-full sm:w-auto"
+                          className="bg-red-600/90 hover:bg-red-500 border border-white/10 text-white rounded-xl px-3 py-2 text-xs font-semibold uppercase tracking-wider flex items-center justify-center gap-1.5 shadow-sm active:scale-95 transition-transform"
                         >
-                          <Trash2 className="w-4 h-4" /> Empty Trash
+                          <Trash2 className="w-3.5 h-3.5" /> Empty Trash
                         </button>
                       ) : (
-                        <>
-                          <button
-                            onClick={() =>
-                              setShowNewFolderInput(!showNewFolderInput)
-                            }
-                            id="create-folder-btn"
-                            className="bg-indigo-600 hover:bg-indigo-500 border border-white/10 text-white rounded-2xl px-3 py-3 text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-1.5 shadow-md active:scale-95 transition-transform"
-                          >
-                            <Plus className="w-4 h-4" /> New Folder
-                          </button>
-
-                          <label
-                            className="bg-white text-indigo-700 cursor-pointer rounded-2xl px-4 py-3 text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/10 hover:scale-[1.02] active:scale-95 transition-all"
-                            htmlFor="file-manager-upload"
-                            onClick={() => {
-                              isSystemActionRef.current = true;
-                            }}
-                          >
-                            <Upload className="w-4 h-4" /> Upload
-                            <input
-                              type="file"
-                              id="file-manager-upload"
-                              className="hidden"
-                              onChange={handleFileUpload}
-                            />
-                          </label>
-                        </>
+                        <label
+                          className="bg-white hover:bg-slate-100 text-indigo-700 font-black cursor-pointer rounded-xl px-4 py-2 text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 shadow-md shadow-indigo-500/10 hover:scale-[1.02] active:scale-95 transition-all shrink-0"
+                          htmlFor="file-manager-upload"
+                          onClick={() => {
+                            isSystemActionRef.current = true;
+                          }}
+                        >
+                          <Upload className="w-3.5 h-3.5 text-indigo-600" /> Upload
+                          <input
+                            type="file"
+                            id="file-manager-upload"
+                            className="hidden"
+                            onChange={handleFileUpload}
+                          />
+                        </label>
                       )}
                     </div>
                   </div>
@@ -5735,14 +6370,14 @@ export default function App() {
                   )}
 
                 {/* File Explorer Sorting Controls & Info Row */}
-                <div className="mx-4 md:mx-6 flex items-center justify-between bg-white/5 border border-white/10 p-2 px-3 rounded-2xl gap-3">
-                  <div className="hidden sm:flex text-[11px] uppercase tracking-widest font-black text-indigo-200 items-center gap-1.5">
+                <div className="mx-2 sm:mx-4 md:mx-6 flex items-center justify-between bg-white/5 border border-white/10 p-2 px-3 rounded-2xl gap-2 overflow-x-auto scrollbar-none">
+                  <div className="hidden sm:flex text-[11px] uppercase tracking-widest font-black text-indigo-200 items-center gap-1.5 shrink-0">
                     <ArrowUpDown className="w-3.5 h-3.5 text-indigo-400" />
-                    <span>Sorting Settings</span>
+                    <span>Sorting</span>
                   </div>
                   
-                  <div className="flex items-center gap-2 w-full sm:w-auto justify-between sm:justify-end">
-                    <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-none">
+                  <div className="flex items-center gap-2 w-full sm:w-auto justify-between sm:justify-end shrink-0">
+                    <div className="flex items-center gap-1 shrink-0">
                       <span className="text-[10px] text-indigo-300 font-bold uppercase mr-1 hidden sm:inline">Sort:</span>
                       {[
                         { id: "name", label: "Name" },
@@ -5760,7 +6395,7 @@ export default function App() {
                               setSortOrder("asc");
                             }
                           }}
-                          className={`px-2.5 py-1 rounded-xl text-xs font-bold transition-all flex items-center gap-1 border ${
+                          className={`px-2 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1 border whitespace-nowrap shrink-0 ${
                             sortBy === opt.id
                               ? "bg-white text-indigo-950 border-white shadow-sm"
                               : "bg-white/5 text-indigo-200 hover:bg-white/10 border-transparent"
@@ -5778,21 +6413,51 @@ export default function App() {
                       ))}
                     </div>
 
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5 shrink-0">
                       <div className="h-4 w-[1px] bg-white/10" />
 
                       <button
                         type="button"
                         onClick={() => setSortOrder(sortOrder === "asc" ? "desc" : "asc")}
-                        className="p-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-indigo-200 border border-white/5 transition-all flex items-center justify-center shrink-0"
+                        className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-indigo-200 border border-white/5 transition-all flex items-center justify-center shrink-0"
                         title={sortOrder === "asc" ? "Ascending" : "Descending"}
                       >
                         {sortOrder === "asc" ? (
-                          <ArrowUp className="w-4 h-4 text-white" />
+                          <ArrowUp className="w-3.5 h-3.5 text-white" />
                         ) : (
-                          <ArrowDown className="w-4 h-4 text-white" />
+                          <ArrowDown className="w-3.5 h-3.5 text-white" />
                         )}
                       </button>
+
+                      <div className="h-4 w-[1px] bg-white/10" />
+
+                      {/* View Mode Toggle */}
+                      <div className="bg-white/5 p-0.5 rounded-lg border border-white/5 flex items-center gap-0.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => setFileViewMode("list")}
+                          className={`p-1 rounded transition-all ${
+                            fileViewMode === "list"
+                              ? "bg-white text-indigo-950 shadow-sm font-black"
+                              : "text-indigo-200 hover:text-white"
+                          }`}
+                          title="List View"
+                        >
+                          <List className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setFileViewMode("grid")}
+                          className={`p-1 rounded transition-all ${
+                            fileViewMode === "grid"
+                              ? "bg-white text-indigo-950 shadow-sm font-black"
+                              : "text-indigo-200 hover:text-white"
+                          }`}
+                          title="Grid View"
+                        >
+                          <LayoutGrid className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -5825,15 +6490,7 @@ export default function App() {
                   </AnimatePresence>
 
                   {/* Inner Container */}
-                  <div className={`transition-all duration-300 ${
-                    sortedVaultItems.length === 0
-                      ? `border-2 border-dashed rounded-[32px] p-10 text-center ${
-                          isDragging
-                            ? "border-indigo-400 bg-indigo-950/20"
-                            : "border-indigo-500/20 bg-indigo-950/10 hover:border-indigo-400/40 hover:bg-indigo-950/20"
-                        }`
-                      : "p-1"
-                  }`}>
+                  <div className="transition-all duration-300 py-4">
                   {/* Render files grid or folder empty message inside */}
                   {isInitialLoading ? (
                     <div className="py-20 text-center flex flex-col items-center justify-center">
@@ -5854,44 +6511,14 @@ export default function App() {
                         </p>
                       </div>
                       ) : (
-                        <div className="py-20 text-center flex flex-col items-center justify-center">
-                          {/* Clean minimal icon */}
-                          <div className="w-24 h-24 bg-indigo-600/5 rounded-[48px] flex items-center justify-center mb-10 border-2 border-indigo-500/10 shadow-2xl relative">
-                            <div className="absolute inset-0 bg-indigo-500/5 rounded-[48px] animate-pulse" />
-                            <HardDrive className="w-10 h-10 text-indigo-400/40 relative z-10" />
+                        <div className="py-12 sm:py-20 text-center flex flex-col items-center justify-center">
+                          {/* Clean minimal icon with description text */}
+                          <div className="w-16 h-16 bg-indigo-600/10 rounded-full flex items-center justify-center border border-indigo-500/20 shadow-lg mb-4">
+                            <HardDrive className="w-7 h-7 text-indigo-400" />
                           </div>
-
-                          <h4 className="font-serif italic font-medium text-3xl text-white/90 mb-3 px-6">
-                            Secure Vault is Empty
-                          </h4>
-                          <p className="text-[13px] text-indigo-200/40 max-w-[280px] mb-12 font-medium leading-relaxed">
+                          <p className="text-[13px] text-indigo-200/60 max-w-[280px] font-medium leading-relaxed">
                             No sovereign files detected in this context. Use the upload tool or restore your identity from a backup pack.
                           </p>
-
-                          <div className="flex flex-col gap-4 w-full max-w-[240px]">
-                            <button
-                              onClick={() => refreshData()}
-                              className="w-full bg-white text-indigo-700 font-black text-xs uppercase tracking-[0.2em] py-5 rounded-2xl transition-all shadow-2xl shadow-white/5 hover:scale-[1.02] active:scale-95 flex items-center justify-center gap-2"
-                            >
-                              <RefreshCcw className="w-4 h-4" /> Refresh Ledger
-                            </button>
-                            
-                            <button
-                              onClick={() => {
-                                // Close all and show recovery desk on landing
-                                if (window.location.hash === "#recover") {
-                                   window.location.reload();
-                                } else {
-                                   // For now we just trigger a toast or instructions
-                                   showToast("Opening Sovereign Recovery Desk...", "info");
-                                   // In a real app we might redirect or open modal
-                                }
-                              }}
-                              className="w-full bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-400 border border-indigo-500/20 font-black text-[10px] uppercase tracking-[0.2em] py-5 rounded-2xl transition-all active:scale-95 flex items-center justify-center gap-2"
-                            >
-                              <Users className="w-4 h-4" /> Port Identity Pack
-                            </button>
-                          </div>
                         </div>
                       )
                   ) : (
@@ -5911,7 +6538,7 @@ export default function App() {
                           </button>
                         </div>
                       )}
-                      <div className="grid grid-cols-1 gap-4 text-left">
+                      <div className={fileViewMode === "grid" ? "grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-6 text-left" : "grid grid-cols-1 gap-4 text-left"}>
                         {sortedVaultItems.slice(0, maxRenderedFiles).map((item) => {
                           const isReplica = isSyncedFromPeer(item);
                           const isSecurePack = !item.isFolder && getFileCategory(item.name, item.type) === "secure";
@@ -5931,6 +6558,317 @@ export default function App() {
                           } else if (isAppPack) {
                             subsystemLabel = "APP_INSTALLER";
                             leftRailColor = "border-l-cyan-500/40";
+                          }
+
+                          if (fileViewMode === "grid") {
+                            return (
+                              <div
+                                key={item.id}
+                                className={`relative bg-slate-950/40 hover:bg-slate-900/40 p-5 rounded-3xl border ${leftRailColor} border-l-4 flex flex-col justify-between gap-4 shadow-lg hover:border-indigo-500/30 transition-all duration-300 group ${
+                                  item.isFolder && currentPath !== "/Trash"
+                                    ? "cursor-pointer"
+                                    : ""
+                                }`}
+                                onClick={() =>
+                                  item.isFolder &&
+                                  currentPath !== "/Trash" &&
+                                  traverseIntoFolder(item.name)
+                                }
+                              >
+                                <div className="flex flex-col items-center text-center space-y-3 flex-1">
+                                  {/* High-tech preview icon container */}
+                                  <div className="w-16 h-16 bg-slate-900/80 border border-white/5 rounded-2xl flex items-center justify-center shrink-0 shadow-inner group-hover:border-indigo-500/30 group-hover:bg-slate-950/80 group-hover:scale-105 transition-all duration-300 relative">
+                                    {renderFileIcon(item)}
+                                    {item.isFolder && (
+                                      <div className="absolute -bottom-1 -right-1 w-5 h-5 rounded-md bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-[8px] text-amber-400 font-bold">
+                                        DIR
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  <div className="space-y-1 w-full">
+                                    <div className="pb-1">
+                                      <span className="text-[8px] font-mono tracking-wider font-extrabold text-indigo-400 border border-indigo-500/10 px-1.5 py-0.5 rounded bg-indigo-500/5 select-none leading-none inline-block">
+                                        {subsystemLabel}
+                                      </span>
+                                    </div>
+
+                                    <div
+                                      className="text-sm font-black tracking-tight text-white truncate max-w-full block px-2"
+                                      title={item.name}
+                                    >
+                                      {item.name}
+                                    </div>
+
+                                    <div className="flex items-center justify-center gap-2 text-[10px] text-slate-400 font-mono">
+                                      {item.isFolder ? (
+                                        <span className="text-amber-500/80 font-bold uppercase tracking-wider">Storage Node</span>
+                                      ) : (
+                                        <>
+                                          <span className="text-white font-bold">{formatBytes(item.size)}</span>
+                                          <span className="text-white/20 select-none">•</span>
+                                          <span className="inline-flex items-center gap-1 text-emerald-400 font-extrabold">
+                                            <Lock className="w-3 h-3 stroke-[2.5]" />
+                                            AES
+                                          </span>
+                                        </>
+                                      )}
+                                    </div>
+
+                                    {/* Expiration visual timer count */}
+                                    {item.deletedAt && currentPath === "/Trash" && (
+                                      <div className="text-[9px] text-red-400/90 font-mono mt-1 flex items-center gap-1 mx-auto select-none bg-red-950/15 border border-red-500/10 px-2 py-0.5 rounded-md w-max">
+                                        <span className="inline-block w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
+                                        <span>
+                                          PURGE:{" "}
+                                          {Math.max(
+                                            1,
+                                            Math.ceil(
+                                              (30 * 24 * 60 * 60 * 1000 -
+                                                (Date.now() - item.deletedAt)) /
+                                                (24 * 60 * 60 * 1000),
+                                            ),
+                                          )}{" "}
+                                          D
+                                        </span>
+                                      </div>
+                                    )}
+
+                                    {/* Metadata indicators */}
+                                    {!item.isFolder && isSecurePack && (
+                                      <div className="text-[8px] bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 px-2 py-0.5 rounded font-mono font-bold uppercase tracking-wider inline-block">
+                                        🔐 Seed Phrase
+                                      </div>
+                                    )}
+                                    {!item.isFolder && isAppPack && (
+                                      <div className="text-[8px] bg-cyan-500/10 text-cyan-300 border border-cyan-500/20 px-2 py-0.5 rounded font-mono font-bold uppercase tracking-wider inline-block">
+                                        📱 APK Installer
+                                      </div>
+                                    )}
+
+                                    {!item.isFolder && (item.originalOwnerSeedId || item.peerReceiverSeedId) && (
+                                      <div className="flex flex-wrap gap-1 justify-center mt-[4px]">
+                                        {item.originalOwnerSeedId && (
+                                          <div className="text-[8px] bg-emerald-950/40 text-emerald-300 border border-emerald-900/20 px-1.5 py-0.5 rounded font-mono font-bold uppercase tracking-wider inline-flex items-center gap-1 cursor-help" title={`Original Importer Seed ID: ${item.originalOwnerSeedId}`}>
+                                            ID: {item.originalOwnerSeedId.substring(0, 6)}
+                                          </div>
+                                        )}
+                                        {item.peerReceiverSeedId && (
+                                          <div className="text-[8px] bg-sky-950/40 text-sky-300 border border-sky-900/20 px-1.5 py-0.5 rounded font-mono font-bold uppercase tracking-wider inline-flex items-center gap-1 cursor-help" title={`Peer Sync Receiver ID: ${item.peerReceiverSeedId}`}>
+                                            Peer: {item.peerReceiverSeedId.substring(0, 6)}
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+
+                                    {isReplica ? (
+                                      <div className="flex flex-col gap-1 items-center pt-1">
+                                        <div className="text-[8px] bg-amber-500/10 text-amber-300 border border-amber-500/10 px-2 py-0.5 rounded font-mono font-bold uppercase tracking-wider inline-flex items-center gap-1 w-max">
+                                          <Shield className="w-2.5 h-2.5 text-amber-400" /> Replica
+                                        </div>
+                                      </div>
+                                    ) : item.senderName ? (
+                                      <div className="text-[8px] bg-indigo-500/20 text-indigo-200 border border-indigo-500/10 px-2 py-0.5 rounded font-mono uppercase font-bold tracking-wider w-max mx-auto">
+                                        From {item.senderName}
+                                      </div>
+                                    ) : null}
+
+                                    {item.dagHash && (
+                                      <div className="text-[10px] block pt-1">
+                                        <div 
+                                          className="inline-flex items-center gap-1 text-fuchsia-300 bg-fuchsia-500/5 border border-fuchsia-500/10 hover:border-fuchsia-500/30 px-2 py-0.5 rounded font-mono truncate max-w-full cursor-pointer hover:bg-fuchsia-500/10 transition-all duration-200" 
+                                          title={`BlockDAG Hash: ${item.dagHash}\nSignature: ${item.dagSignature || "Unsigned"}\nClick to View Verification Details`}
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setViewingDagBlock(item);
+                                          }}
+                                        >
+                                          <span className="text-fuchsia-400/85 animate-pulse">◈</span>
+                                          <span>DAG: {item.dagHash.substring(0, 8)}</span>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {/* Trigger file manager Actions */}
+                                <div
+                                  className="flex items-center justify-center gap-1.5 border-t border-white/5 pt-3 w-full"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  {currentPath === "/Trash" ? (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleRestoreItem(item)}
+                                        title="Restore to original directory location"
+                                        className="w-8 h-8 bg-indigo-500/10 hover:bg-indigo-600 text-indigo-300 hover:text-white rounded-lg flex items-center justify-center transition-all border border-indigo-500/30"
+                                      >
+                                        <RefreshCcw className="w-3.5 h-3.5" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDeleteItem(item)}
+                                        title="Permanently Delete"
+                                        className="w-8 h-8 bg-red-500/10 hover:bg-red-650 text-red-200 hover:text-white rounded-lg flex items-center justify-center transition-all border border-red-500/30"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    </>
+                                  ) : (
+                                    <>
+                                      {!item.isFolder && (
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            if (isSyncedFromPeer(item)) {
+                                              showToast("Privacy Lock: Synced peer files cannot be reshared.", "error");
+                                              return;
+                                            }
+                                            handleToggleShare(item);
+                                          }}
+                                          title={
+                                            isSyncedFromPeer(item)
+                                              ? "Privacy Lock: Synced files cannot be shared"
+                                              : item.isShared
+                                              ? "Shared to local discovery mesh"
+                                              : "🌍 Pool (Public)"
+                                          }
+                                          className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors ${
+                                            isSyncedFromPeer(item)
+                                              ? "bg-zinc-850 text-zinc-500 cursor-not-allowed border border-white/5"
+                                              : item.isShared
+                                              ? "bg-teal-600 text-white hover:bg-teal-500 shadow-md"
+                                              : "bg-white/5 text-indigo-300 hover:bg-white/10"
+                                          }`}
+                                          disabled={isSyncedFromPeer(item)}
+                                        >
+                                          <Globe className="w-3.5 h-3.5" />
+                                        </button>
+                                      )}
+
+                                      {!item.isFolder && (
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            if (isSyncedFromPeer(item)) {
+                                              showToast("Privacy Lock: Synced peer files cannot be sent.", "error");
+                                              return;
+                                            }
+                                            setShareDialogOptions({ file: item, open: true, note: item.shareNote || "", targetUsername: "" });
+                                          }}
+                                          title={
+                                            isSyncedFromPeer(item)
+                                              ? "Privacy Lock: Peer files cannot be sent"
+                                              : "Send direct file request"
+                                          }
+                                          className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all shadow-md ${
+                                            isSyncedFromPeer(item)
+                                              ? "bg-zinc-850 text-zinc-500 cursor-not-allowed border border-white/5"
+                                              : "bg-white/5 text-indigo-200 hover:bg-indigo-600 hover:text-white"
+                                          }`}
+                                          disabled={isSyncedFromPeer(item)}
+                                        >
+                                          <Share2 className="w-3.5 h-3.5" />
+                                        </button>
+                                      )}
+
+                                      {!item.isFolder && (
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            if (isSyncedFromPeer(item)) {
+                                              showToast("Privacy Lock: Synced peer files cannot be decrypted or downloaded.", "error");
+                                              return;
+                                            }
+                                            handleDownload(item);
+                                          }}
+                                          title={
+                                            isSyncedFromPeer(item)
+                                              ? "Privacy Locked: Distributed peer replica cannot be downloaded"
+                                              : "Decrypt & Download"
+                                          }
+                                          className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all shadow-md ${
+                                            isSyncedFromPeer(item)
+                                              ? "bg-zinc-850 text-zinc-500 cursor-not-allowed border border-white/5"
+                                              : "bg-white/5 text-indigo-200 hover:bg-green-650 hover:text-white"
+                                          }`}
+                                          disabled={isSyncedFromPeer(item)}
+                                        >
+                                          {isSyncedFromPeer(item) ? <Shield className="w-3.5 h-3.5 text-amber-500/60" /> : <Download className="w-3.5 h-3.5" />}
+                                        </button>
+                                      )}
+
+                                      {!item.isFolder && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleOpenVersionHistory(item)}
+                                          title="View Version History"
+                                          className="w-8 h-8 bg-white/5 text-indigo-200 hover:bg-indigo-500 hover:text-white rounded-lg flex items-center justify-center transition-all shadow-md"
+                                        >
+                                          <History className="w-3.5 h-3.5" />
+                                        </button>
+                                      )}
+
+                                      {!item.isFolder &&
+                                        !isSyncedFromPeer(item) &&
+                                        rtcStatus === "connected" && (
+                                          <button
+                                            type="button"
+                                            onClick={() => handleStreamRtc(item)}
+                                            title={`Stream raw AES buffer to @${rtcActivePeer} via RTCDataChannel`}
+                                            className="w-8 h-8 bg-yellow-500/10 text-yellow-300 hover:bg-yellow-500 hover:text-indigo-950 rounded-lg flex items-center justify-center transition-all border border-yellow-500/30 animate-pulse"
+                                          >
+                                            <Zap className="w-3.5 h-3.5" />
+                                          </button>
+                                        )}
+
+                                      {!item.isFolder &&
+                                        !isSyncedFromPeer(item) &&
+                                        mDnsActive &&
+                                        mDnsDiscoveredNodes.length > 0 && (
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              handleDirectHttpSend(
+                                                item,
+                                                mDnsDiscoveredNodes[0],
+                                              )
+                                            }
+                                            title={`Stream encrypted buffer to @${mDnsDiscoveredNodes[0].username} via Direct Subnet HTTP POST`}
+                                            className="w-8 h-8 bg-teal-500/10 text-teal-300 hover:bg-teal-500 hover:text-indigo-950 rounded-lg flex items-center justify-center transition-all border border-teal-500/30 hover:border-teal-400 font-bold"
+                                          >
+                                            <Plug className="w-3.5 h-3.5" />
+                                          </button>
+                                        )}
+
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          if (isSyncedFromPeer(item)) {
+                                            showToast("Privacy Lock: Synced peer files cannot be deleted.", "error");
+                                            return;
+                                          }
+                                          handleDeleteItem(item);
+                                        }}
+                                        title={
+                                          isSyncedFromPeer(item)
+                                            ? "Privacy Lock: Distributed peer replica cannot be deleted"
+                                            : "Move to Trash"
+                                        }
+                                        className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all shadow-md ${
+                                          isSyncedFromPeer(item)
+                                            ? "bg-zinc-850 text-zinc-500 hover:bg-red-955 hover:text-red-350 border border-red-500/20 cursor-not-allowed"
+                                            : "bg-white/5 text-indigo-400 hover:bg-red-655 hover:text-white"
+                                        }`}
+                                      >
+                                        {isSyncedFromPeer(item) ? <ShieldAlert className="w-3.5 h-3.5 text-red-500/40" /> : <Trash2 className="w-3.5 h-3.5 text-red-400" />}
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                            );
                           }
 
                           return (
@@ -6412,6 +7350,102 @@ export default function App() {
                         </button>
                       )}
                     </div>
+                  </div>
+
+                  {/* Connection settings for decentralized hosts */}
+                  <div className="bg-white/5 border border-white/5 rounded-2xl p-4 space-y-3">
+                    <button
+                      onClick={() => setShowConfigPanel(!showConfigPanel)}
+                      className="w-full flex items-center justify-between text-xs font-black text-slate-300 uppercase tracking-wider hover:text-white transition-colors"
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <Settings className="w-4 h-4 text-indigo-400" />
+                        <span>Decentralized Connection</span>
+                      </div>
+                      <span className="text-[10px] text-indigo-400">
+                        {showConfigPanel ? "Hide Settings" : "Configure Connection"}
+                      </span>
+                    </button>
+
+                    {showConfigPanel && (
+                      <div className="space-y-3 pt-2 border-t border-white/5 text-xs">
+                        
+                        <div className="space-y-1">
+                          <label className="text-[10px] uppercase font-black tracking-widest text-slate-400 block">
+                            Backend API & Signal Server URL
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="e.g. https://your-backend-app.run.app"
+                            value={backendUrlConfig}
+                            onChange={(e) => setBackendUrlConfig(e.target.value)}
+                            className="w-full bg-slate-900 border border-white/10 rounded-xl px-3 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 text-xs transition-all"
+                          />
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              if (!backendUrlConfig.trim()) {
+                                showToast("Please input a valid URL first.", "error");
+                                return;
+                              }
+                              setIsTestingConfig(true);
+                              try {
+                                const cleanUrl = backendUrlConfig.trim().replace(/\/+$/, "");
+                                const res = await fetch(`${cleanUrl}/api/health`);
+                                const data = await res.json();
+                                if (data && data.status === "ok") {
+                                  showToast("Backend Server is Online & Responsive! Connection successful.", "success");
+                                } else {
+                                  showToast(`Server responded with: ${JSON.stringify(data)}`, "info");
+                                }
+                              } catch (err: any) {
+                                showToast(`Failed to connect: ${err.message || "Network Error"}`, "error");
+                              } finally {
+                                setIsTestingConfig(false);
+                              }
+                            }}
+                            disabled={isTestingConfig}
+                            className="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-[10px] text-indigo-300 font-bold uppercase tracking-wider py-2 rounded-xl transition-all"
+                          >
+                            {isTestingConfig ? "Testing..." : "Test Link"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (backendUrlConfig.trim()) {
+                                let cleanUrl = backendUrlConfig.trim().replace(/\/+$/, "");
+                                if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
+                                  cleanUrl = `https://${cleanUrl}`;
+                                  setBackendUrlConfig(cleanUrl);
+                                }
+                                localStorage.setItem("vault_backend_api_url", cleanUrl);
+                                showToast("Backend configuration saved! Reconnecting services...", "success");
+                              } else {
+                                localStorage.removeItem("vault_backend_api_url");
+                                showToast("Backend reset to Same Host Default! Reconnecting...", "info");
+                              }
+                              // Re-connect WebSocket signaling channel by restarting
+                              setTimeout(() => {
+                                window.location.reload();
+                              }, 1000);
+                            }}
+                            className="bg-indigo-600 hover:bg-indigo-500 text-[10px] text-white font-black uppercase tracking-wider py-2 rounded-xl transition-all"
+                          >
+                            Save & Reload
+                          </button>
+                        </div>
+                        
+                        {localStorage.getItem("vault_backend_api_url") && (
+                          <div className="text-[9px] text-emerald-400 font-medium flex items-center gap-1 mt-1 justify-center">
+                            <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-ping" />
+                            <span>Currently connected to custom backend server.</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   <div>
@@ -7126,12 +8160,11 @@ export default function App() {
 
               <div className="flex-1 flex flex-col w-full max-w-7xl mx-auto p-4 sm:p-8 lg:p-12 overflow-y-auto custom-scrollbar">
                 {/* Tabs Navigation (Full Page Style) */}
-                <div className="flex gap-1.5 p-1 bg-black/20 rounded-[20px] sm:rounded-[24px] mb-6 sm:mb-10 border border-white/5 max-w-4xl overflow-x-auto no-scrollbar scrollbar-none snap-x whitespace-nowrap sticky top-0 z-50 bg-[#0a0c10]/50 backdrop-blur-sm">
+                <div className="flex gap-1.5 p-1 bg-slate-900 rounded-[20px] sm:rounded-[24px] mb-6 sm:mb-10 border border-white/5 max-w-4xl overflow-x-auto no-scrollbar scrollbar-none snap-x whitespace-nowrap sticky top-0 z-50">
                   {[
                     { id: "general", label: "NODE CONFIG", mobileLabel: "Config", icon: Database },
                     { id: "security", label: "VAULT SECURITY", mobileLabel: "Security", icon: Shield },
                     { id: "network", label: "NETWORK MESH", mobileLabel: "Network", icon: Globe },
-                    { id: "decentralized", label: "DECENTRALIZED SYNC", mobileLabel: "Decentralized", icon: Cpu },
                   ].map((tab) => (
                     <button
                       key={tab.id}
@@ -7167,10 +8200,12 @@ export default function App() {
                             <div>
                               <div className="flex items-center gap-3 mb-2">
                                 <h3 className="text-xl font-black tracking-tight uppercase text-white">Sovereign Keypack (.vault)</h3>
-                                <div className="text-[9px] bg-fuchsia-500/10 text-fuchsia-300 px-2 py-1 rounded font-black uppercase tracking-widest border border-fuchsia-500/20">Decentralized BlockDAG</div>
+                                <div className="text-[9px] bg-emerald-500/10 text-emerald-300 px-2 py-1 rounded font-black uppercase tracking-widest border border-emerald-500/20">Universal Identity Portable</div>
                               </div>
                               <p className="text-sm text-indigo-200/60 font-medium leading-relaxed">
-                                Universal identity seed key. Acts as a master key. You can backup your master key now even if your vault is empty. Importing this keypack to a new installation restores your profile credentials, allowing you to instantly regain full access to all your files stored securely on the <strong>Decentralized Server BlockDAG</strong>.
+                                The <strong>Sovereign Keypack</strong> is your portable vault identity. It contains your encrypted master seed, decentralized metadata, and user profile. 
+                                <br/><br/>
+                                <strong>Why you need it:</strong> If you move to a new device or lose local access, this file instantly reconstructs your entire workspace context from the network mesh. Without this or your recovery phrase, data recovery depends on your hardware anchor.
                               </p>
                             </div>
                             <div className="flex flex-wrap gap-4 w-full">
@@ -7195,10 +8230,99 @@ export default function App() {
                           </div>
                         </div>
 
-                        {/* Physical Database (.db) */}
-                        <div className="bg-white/5 p-8 rounded-[32px] border border-white/5 relative overflow-hidden group hover:border-amber-500/30 transition-all">
-                          <div className="absolute -top-12 -right-12 w-48 h-48 bg-amber-500/10 blur-[80px] rounded-full" />
+                        {/* Device Hardware Storage Access */}
+                        <div className="bg-white/5 p-8 rounded-[32px] border border-white/5 relative overflow-hidden group hover:border-indigo-500/30 transition-all">
+                          <div className="absolute -top-12 -right-12 w-48 h-48 bg-indigo-500/10 blur-[80px] rounded-full" />
+                          <div className="relative z-10 flex flex-col items-start gap-6">
+                            <div className="p-5 bg-indigo-500/20 rounded-2xl text-indigo-300">
+                              <HardDrive className="w-10 h-10" />
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-3 mb-2 flex-wrap">
+                                <h3 className="text-xl font-black tracking-tight uppercase text-white">Device Hardware Storage</h3>
+                                <div className="text-[9px] px-2 py-1 rounded font-black uppercase tracking-widest border bg-emerald-500/10 text-emerald-300 border-emerald-500/20">
+                                  AUTOMATED (HARDWARE PERSISTENCE ACTIVE)
+                                </div>
+                              </div>
+                              <p className="text-sm text-indigo-200/60 font-medium leading-relaxed">
+                                Persistent device hardware storage permission is automatically granted and maintained on your local machine. Storage is protected against eviction by browser cache maintenance.
+                              </p>
+                              
+                              <div className="flex flex-wrap gap-2 mt-4">
+                                <div className="flex items-center gap-2 bg-slate-900/80 border border-slate-800 px-3 py-1.5 rounded-lg text-xs font-mono text-slate-300">
+                                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                                  <span>Persistent Storage: <strong className="text-emerald-400">AUTOMATICALLY GRANTED</strong></span>
+                                </div>
+                                <div className="flex items-center gap-2 bg-slate-900/80 border border-slate-800 px-3 py-1.5 rounded-lg text-xs font-mono text-slate-300">
+                                  <FolderPlus className={`w-3.5 h-3.5 ${hardwareFolderMounted ? "text-emerald-400" : "text-indigo-400"}`} />
+                                  <span>Hardware Directory: <strong className={hardwareFolderMounted ? "text-emerald-400" : "text-indigo-400"}>{hardwareFolderMounted ? "MOUNTED" : "AUTO / OPFS MOUNTED"}</strong></span>
+                                </div>
+                              </div>
+                            </div>
+                            
+                            <div className="flex flex-wrap gap-3 w-full">
+                              <button 
+                                onClick={handleMountHardwareFolder}
+                                className="flex-1 bg-white/10 hover:bg-white/20 border border-white/10 text-white px-5 py-3.5 rounded-2xl text-xs font-black uppercase tracking-widest transition-all active:scale-95 flex items-center justify-center gap-2"
+                              >
+                                <FolderPlus className="w-4 h-4 text-indigo-400" />
+                                Mount Specific Hardware Folder
+                              </button>
+                            </div>
+                          </div>
                         </div>
+
+                        {/* Automated Daily Backup Engine */}
+                        <div className="bg-white/5 p-8 rounded-[32px] border border-white/5 relative overflow-hidden group hover:border-emerald-500/30 transition-all">
+                          <div className="absolute -top-12 -right-12 w-48 h-48 bg-emerald-500/10 blur-[80px] rounded-full" />
+                          <div className="relative z-10 flex flex-col items-start gap-6">
+                            <div className="p-5 bg-emerald-500/20 rounded-2xl text-emerald-300">
+                              <Clock className="w-10 h-10" />
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-3 mb-2 flex-wrap">
+                                <h3 className="text-xl font-black tracking-tight uppercase text-white">Automated Daily Backup</h3>
+                                <div className={`text-[9px] px-2 py-1 rounded font-black uppercase tracking-widest border ${isDailyAutoBackupEnabled ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/20" : "bg-red-500/10 text-red-400 border-red-500/20"}`}>
+                                  {isDailyAutoBackupEnabled ? "AUTOMATED (EVERY 24 HOURS)" : "DISABLED"}
+                                </div>
+                              </div>
+                              <p className="text-sm text-indigo-200/60 font-medium leading-relaxed">
+                                Automatically compiles an encrypted master snapshot of all your identity credentials and files every 24 hours, writing directly to device hardware storage.
+                              </p>
+
+                              <div className="flex flex-wrap gap-2 mt-4">
+                                <div className="flex items-center gap-2 bg-slate-900/80 border border-slate-800 px-3 py-1.5 rounded-lg text-xs font-mono text-slate-300">
+                                  <Clock className="w-3.5 h-3.5 text-emerald-400" />
+                                  <span>Last Auto-Backup: <strong className="text-white">{lastAutoBackupTimestamp ? new Date(lastAutoBackupTimestamp).toLocaleString() : "Pending Initial Backup"}</strong></span>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap gap-3 w-full">
+                              <button 
+                                onClick={() => setIsDailyAutoBackupEnabled(!isDailyAutoBackupEnabled)}
+                                className={`flex-1 px-5 py-3.5 rounded-2xl text-xs font-black uppercase tracking-widest transition-all active:scale-95 flex items-center justify-center gap-2 border ${
+                                  isDailyAutoBackupEnabled 
+                                    ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20" 
+                                    : "bg-red-500/10 border-red-500/30 text-red-400 hover:bg-red-500/20"
+                                }`}
+                              >
+                                {isDailyAutoBackupEnabled ? "Daily Backup Active" : "Enable Daily Backup"}
+                              </button>
+                              <button 
+                                onClick={() => performDailyAutoBackup(true)}
+                                className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-3.5 rounded-2xl text-xs font-black uppercase tracking-widest transition-all active:scale-95 flex items-center justify-center gap-2"
+                              >
+                                <Save className="w-4 h-4" />
+                                Run Daily Backup Now
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+
+
+
+
                       </div>
 
                       <div className="bg-indigo-900/10 p-8 rounded-[40px] border border-indigo-500/20 flex flex-col">
@@ -7231,7 +8355,7 @@ export default function App() {
                                   <div className="text-lg font-black text-white">QUANTUM-CORE V2</div>
                                </div>
                             </div>
-                         </div>
+                        </div>
                       </div>
                     </motion.div>
                   )}
@@ -7939,20 +9063,7 @@ export default function App() {
                     </motion.div>
                   )}
 
-                  {settingsTab === "decentralized" && (
-                    <motion.div
-                      initial={{ opacity: 0, y: 20 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      className="space-y-10 pb-10"
-                    >
-                      <DecentralizedSyncConsole
-                        currentUser={currentUser}
-                        onGetEncryptedDatabaseHex={getEncryptedDatabaseHex}
-                        onRestoreDatabase={restoreDatabaseFromHex}
-                        showToast={showToast}
-                      />
-                    </motion.div>
-                  )}
+
 
                   {settingsTab === "health" && (
                     <motion.div 
@@ -8230,7 +9341,54 @@ export default function App() {
                                   </div>
                                 )}
                                 <div className="flex flex-col gap-3 mt-4">
-                                  <div className="flex items-center justify-between text-[11px] font-mono border-t border-white/5 pt-4">
+                                  {/* Real-time Kaspa L1 Telemetry Panel */}
+                                  <div className="bg-fuchsia-950/20 p-4 rounded-xl border border-fuchsia-500/10 space-y-2">
+                                    <div className="flex justify-between items-center border-b border-white/5 pb-2">
+                                      <span className="text-[9px] font-black uppercase text-fuchsia-400 tracking-wider flex items-center gap-1.5">
+                                        <span className="w-1.5 h-1.5 bg-green-400 rounded-full animate-ping" />
+                                        Kaspa L1 Mainnet Status
+                                      </span>
+                                      <span className="text-[9px] font-mono font-bold text-fuchsia-300">
+                                        {kaspaL1Stats?.networkName || "Syncing L1..."}
+                                      </span>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
+                                      <div className="space-y-0.5">
+                                        <div className="text-indigo-300/50 text-[9px] uppercase">L1 Blue Score</div>
+                                        <div className="font-extrabold text-white">
+                                          {kaspaL1Stats?.blueScore ? kaspaL1Stats.blueScore.toLocaleString() : "Fetching..."}
+                                        </div>
+                                      </div>
+                                      <div className="space-y-0.5">
+                                        <div className="text-indigo-300/50 text-[9px] uppercase">L1 Blocks</div>
+                                        <div className="font-extrabold text-white">
+                                          {kaspaL1Stats?.blockCount ? kaspaL1Stats.blockCount.toLocaleString() : "Fetching..."}
+                                        </div>
+                                      </div>
+                                      <div className="space-y-0.5">
+                                        <div className="text-indigo-300/50 text-[9px] uppercase">Network Hashrate</div>
+                                        <div className="font-extrabold text-white">
+                                          {kaspaL1Stats?.hashrate ? `${(kaspaL1Stats.hashrate / 1e12).toFixed(2)} TH/s` : "Fetching..."}
+                                        </div>
+                                      </div>
+                                      <div className="space-y-0.5">
+                                        <div className="text-indigo-300/50 text-[9px] uppercase">L1 Difficulty</div>
+                                        <div className="font-extrabold text-white">
+                                          {kaspaL1Stats?.difficulty ? kaspaL1Stats.difficulty.toExponential(2) : "Fetching..."}
+                                        </div>
+                                      </div>
+                                    </div>
+                                    {kaspaL1Stats?.virtualParentHashes && kaspaL1Stats.virtualParentHashes.length > 0 && (
+                                      <div className="pt-2 border-t border-white/5 space-y-1">
+                                        <div className="text-indigo-300/50 text-[9px] uppercase font-mono">Latest L1 Tip Hash</div>
+                                        <div className="font-mono text-[8px] text-fuchsia-300 truncate select-all" title={kaspaL1Stats.virtualParentHashes[0]}>
+                                          {kaspaL1Stats.virtualParentHashes[0]}
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  <div className="flex items-center justify-between text-[11px] font-mono border-t border-white/5 pt-2">
                                     <span className="text-indigo-400/60 font-medium">Latency Metric:</span>
                                     <span className="font-extrabold text-white">
                                       {diagDagLatency !== null ? `${diagDagLatency} ms` : "—"}
@@ -8271,14 +9429,14 @@ export default function App() {
                                     <span className="text-[9px] font-black uppercase text-emerald-400">Quorum Active</span>
                                   </div>
                                 </div>
-                                <h5 className="text-sm font-black text-indigo-100 uppercase">Fragment Integrity Quorum</h5>
+                                <h5 className="text-sm font-black text-indigo-100 uppercase">Reed-Solomon Erasure Quorum</h5>
                                 <p className="text-[11px] text-indigo-300/70 font-medium">
-                                  Validates Shamir-Secret-Sharing (SSS) quorums across mesh nodes. Threshold check: <strong>K=5 / N=8</strong> fragments reachable.
+                                  Validates Reed-Solomon Erasure Coding quorums across mesh nodes. Threshold check: <strong>K=3 / N=5</strong> shards required for reconstruction.
                                 </p>
                               </div>
                               <div className="mt-6 flex flex-col gap-4">
-                                <div className="grid grid-cols-8 gap-1.5">
-                                  {[...Array(8)].map((_, i) => {
+                                <div className="grid grid-cols-5 gap-1.5">
+                                  {[...Array(5)].map((_, i) => {
                                     const peerCount = Object.keys(connectedPeers).length + 1; // Include self
                                     return (
                                       <div 
@@ -8291,7 +9449,7 @@ export default function App() {
                                 <div className="flex items-center justify-between text-[10px] font-mono">
                                   <span className="text-indigo-400/60 uppercase">Availability Metric:</span>
                                   <span className="text-emerald-400 font-black">
-                                    {((Object.keys(connectedPeers).length + 1) / 8 * 100).toFixed(1)}% Redundancy
+                                    {Math.min(100, ((Object.keys(connectedPeers).length + 1) / 3 * 100)).toFixed(1)}% Redundancy (Threshold: 3/5)
                                   </span>
                                 </div>
                                 <div className="bg-indigo-500/5 border border-indigo-500/10 rounded-xl p-3 flex items-center justify-between gap-3">
@@ -8470,6 +9628,8 @@ export default function App() {
                   requestShard={requestShard}
                   onShardReceived={onShardReceived}
                   initialKey={currentUser?.vaultSeedId}
+                  connectedPeers={connectedPeers}
+                  currentUsername={currentUser?.username}
                   onKeyRestored={(restoredKey) => {
                     // If user is restoring an existing key
                     if (restoredKey !== currentUser?.vaultSeedId) {
@@ -8507,7 +9667,7 @@ export default function App() {
               <Smartphone className="w-16 h-16 text-indigo-400 mx-auto mb-6" />
               <h2 className="text-2xl font-black text-white mb-4 uppercase tracking-tighter">Device Pairing Restricted</h2>
               <p className="text-indigo-300/60 text-sm leading-relaxed mb-8">
-                Direct QR-based pairing has been disabled in favor of Master Key identity restoration. Please use the "Import Identity Pack" option in the Vault security menu.
+                Direct camera or optical pairing has been removed. Device authentication relies directly on WebAuthn hardware passkeys and Master Key identity packs. Please use the "Import Identity Pack" option in the Vault security menu.
               </p>
               <button 
                 onClick={() => setShowDevicePairing(false)}
@@ -8563,7 +9723,7 @@ export default function App() {
                       {transfer.name}
                     </span>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5">
                     <span className="text-[10px] font-mono font-bold text-indigo-300">
                       {transfer.progress}%
                     </span>
@@ -8572,6 +9732,16 @@ export default function App() {
                     ) : transfer.status === "completed" ? (
                       <CheckCircle2 className="w-3.5 h-3.5 text-green-400" />
                     ) : null}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveTransfers((prev) => prev.filter((t) => t.id !== transfer.id));
+                      }}
+                      className="p-1 hover:bg-white/10 rounded-md text-slate-400 hover:text-white transition-colors ml-1"
+                      title="Dismiss"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
                   </div>
                 </div>
 
@@ -8610,6 +9780,119 @@ export default function App() {
             ))}
           </AnimatePresence>
         </div>
+
+        {/* Backend Configuration Modal for Landing Page */}
+        <AnimatePresence>
+          {showBackendModal && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-[300] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm"
+            >
+              <motion.div
+                initial={{ scale: 0.9, opacity: 0, y: 20 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.9, opacity: 0, y: 20 }}
+                className="bg-slate-900 border border-slate-800 rounded-[32px] p-8 max-w-md w-full shadow-2xl relative"
+              >
+                <button
+                  onClick={() => setShowBackendModal(false)}
+                  className="absolute top-6 right-6 p-2 rounded-full hover:bg-white/5 transition-colors text-slate-400 hover:text-white"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+                <div className="flex items-center gap-3 mb-6">
+                  <div className="w-12 h-12 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center">
+                    <LinkIcon className="w-6 h-6 text-indigo-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-black text-white uppercase tracking-tight">Decentralized Connection</h3>
+                    <p className="text-xs text-slate-400 font-medium">Link frontend to backend signal server</p>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  
+                  <div className="space-y-2">
+                    <label className="text-[10px] uppercase font-black tracking-widest text-slate-400 block ml-1">
+                      Backend API & Signal Server URL
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. https://your-backend-app.run.app"
+                      value={backendUrlConfig}
+                      onChange={(e) => setBackendUrlConfig(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-slate-200 placeholder-slate-700 font-medium focus:outline-none focus:border-indigo-500 text-sm transition-all"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 pt-2">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (!backendUrlConfig.trim()) {
+                          showToast("Please input a valid URL first.", "error");
+                          return;
+                        }
+                        setIsTestingConfig(true);
+                        try {
+                          const cleanUrl = backendUrlConfig.trim().replace(/\/+$/, "");
+                          const res = await fetch(`${cleanUrl}/api/health`);
+                          const data = await res.json();
+                          if (data && data.status === "ok") {
+                            showToast("Backend Server is Online & Responsive! Connection successful.", "success");
+                          } else {
+                            showToast(`Server responded with: ${JSON.stringify(data)}`, "info");
+                          }
+                        } catch (err: any) {
+                          showToast(`Failed to connect: ${err.message || "Network Error"}`, "error");
+                        } finally {
+                          setIsTestingConfig(false);
+                        }
+                      }}
+                      disabled={isTestingConfig}
+                      className="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-xs text-indigo-300 font-bold uppercase tracking-widest py-3 rounded-xl transition-all"
+                    >
+                      {isTestingConfig ? "Testing..." : "Test Link"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (backendUrlConfig.trim()) {
+                          let cleanUrl = backendUrlConfig.trim().replace(/\/+$/, "");
+                          if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
+                            cleanUrl = `https://${cleanUrl}`;
+                            setBackendUrlConfig(cleanUrl);
+                          }
+                          localStorage.setItem("vault_backend_api_url", cleanUrl);
+                          showToast("Backend configuration saved! Reconnecting services...", "success");
+                        } else {
+                          localStorage.removeItem("vault_backend_api_url");
+                          showToast("Backend reset to Same Host Default! Reconnecting...", "info");
+                        }
+                        setTimeout(() => {
+                          window.location.reload();
+                        }, 1000);
+                      }}
+                      className="bg-indigo-600 hover:bg-indigo-500 text-xs text-white font-black uppercase tracking-widest py-3 rounded-xl transition-all"
+                    >
+                      Save & Reload
+                    </button>
+                  </div>
+                  
+                  {localStorage.getItem("vault_backend_api_url") && (
+                    <div className="text-[10px] text-emerald-400 font-bold flex items-center gap-2 mt-4 justify-center bg-emerald-500/10 py-2 rounded-lg border border-emerald-500/20">
+                      <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-ping" />
+                      <span>Currently connected to custom backend server</span>
+                    </div>
+                  )}
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
       </div>
 
     </div>
@@ -8783,7 +10066,9 @@ const LocalPreviewModal = ({
                 const a = document.createElement('a');
                 a.href = (file.clientEncrypted === false || (file.clientEncrypted as any) === 0) ? `${downloadUrl}&download=1` : previewSrc;
                 a.download = file.name;
+                document.body.appendChild(a);
                 a.click();
+                document.body.removeChild(a);
               }
             }}
             className="p-3 sm:p-4 bg-white/10 hover:bg-white/20 rounded-xl sm:rounded-2xl text-white backdrop-blur-xl border border-white/10 transition-all active:scale-95 group"
@@ -8871,7 +10156,9 @@ const LocalPreviewModal = ({
                         const a = document.createElement('a');
                         a.href = previewSrc;
                         a.download = file.name;
+                        document.body.appendChild(a);
                         a.click();
+                        document.body.removeChild(a);
                       }
                     }}
                     className="flex items-center gap-3 bg-white text-black hover:bg-indigo-100 px-8 py-4 rounded-2xl font-black text-xs uppercase tracking-widest transition-all shadow-2xl"

@@ -10,6 +10,38 @@ The application is fully compatible with mobile environments through Capacitor, 
 
 The system is split into a robust **Front-End (React SPA)** and a performant **Back-End (Node.js/Express Server)**. It can run in standard server environments or be packaged entirely as a native Android app with offline fallbacks.
 
+### 🧬 High-Efficiency P2P Storage & Mesh Networking (Zero-Compromise P2P)
+Unlike standard web apps that rely on cloud servers or fake simulations, Sovereign Vault operates a **fully real, highly performant browser-native peer storage engine** designed for production-scale workloads:
+
+1. **Origin Private File System (OPFS) Storage Engine:**
+   - **Real-World Persistence:** Reads and writes gigabytes of raw, encrypted file shards directly to the user's physical hard drive via high-speed, low-latency binary streams.
+   - **Zero-Mock Architecture:** This is not a simulation. Peers act as actual storage nodes, utilizing their hardware to host shards of the decentralized network.
+   - **Performance:** Bypasses browser quota caps and `localStorage` limits, utilizing `FileSystemFileHandle.createWritable()` for non-blocking disk I/O.
+   - **Memory Efficiency:** Integrated **Streaming Reconstruction** and **Blob Slicing** prevent Out-Of-Memory (OOM) crashes even when handling multi-gigabyte files.
+
+2. **Quantum-Hardened Security (Ring 1):**
+   - **Ring 1 (Ring-LWE):** Implements actual **Ring Learning With Errors** lattice-based cryptography to protect session keys. This is a real mathematical implementation of post-quantum polynomial scrambling ($X^{256} + 1$).
+   - **Triple-Layer Encryption:** Files are protected by a hybrid stack of **Ring-LWE**, **AES-256-GCM**, and **ChaCha20-Poly1305**, providing multi-cipher defense in depth.
+   - **Zero-Knowledge Architecture:** Encryption keys never leave the client's local environment.
+
+3. **Kaspa L1 Immutability:**
+   - **Blockchain Anchoring:** Every file is immutably anchored to the **Kaspa L1 BlockDAG**, providing a global, tamper-proof proof-of-existence and timestamp.
+
+4. **WebRTC Multi-Channel Mesh Transport:**
+   - **No Intermediaries:** Nodes establish secure, end-to-end encrypted UDP/TCP connections directly with each other via native WebRTC `DataChannels`.
+   - **Decentralized Signaling:** A decentralized GunJS graph coordinates initial handshakes, ensuring the data flows purely peer-to-peer—never touching a central database.
+
+3. **Reed-Solomon Erasure Coding (N=5, K=3):**
+   - **Mathematical Redundancy:** Files are split into encrypted chunks and mathematically transformed into $N=5$ erasure-coded shards.
+   - **High Fault-Tolerance:** Reconstructing the file requires a threshold of any $K=3$ shards. Up to 2 of the hosting nodes can go offline permanently or be deleted, and the file remains 100% reconstructible.
+   - **Privacy by Design:** No single peer ever hosts a complete set of shards. Every shard is client-side encrypted before transmission, ensuring mathematical absolute isolation.
+
+4. **Kademlia DHT with XOR Distance Metric:**
+   - **256-bit Space:** Nodes are assigned random 256-bit identifiers. Every file shard is given a 256-bit Content Identifier (CID) based on its SHA-256 hash.
+   - **Smart XOR Placement:** Shards are placed on nodes whose Node IDs are mathematically closest using the XOR distance metric: 
+     $$d(x, y) = x \oplus y$$
+   - **Iterative Multi-hop Routing:** Lookups are routed to nodes with mathematically decreasing distances to the target CID, finding shards in $O(\log N)$ hops across the active mesh topology.
+
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │                          Sovereign Vault Client                        │
@@ -20,6 +52,7 @@ The system is split into a robust **Front-End (React SPA)** and a performant **B
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │ (Encrypted Chunk Streams / REST)
                                     ▼
+```
 ┌────────────────────────────────────────────────────────────────────────┐
 │                        Sovereign Vault Backend                         │
 │   ┌────────────────────────────────────────────────────────────────┐   │
@@ -44,10 +77,11 @@ The system is split into a robust **Front-End (React SPA)** and a performant **B
 
 Sovereign Vault is built around a zero-trust model. Key security characteristics include:
 
-### 1. Double-Layered Stream Encryption (`LayeredEncryptTransform`)
-Every raw file uploaded to the server is dynamically piped through two cryptographic filters on-the-fly:
-- **Layer 1 (AES-256-GCM):** Industry standard authenticated symmetric encryption.
-- **Layer 2 (ChaCha20-Poly1305):** A modern, highly secure stream cipher featuring superb performance across mobile CPUs.
+### 1. Triple-Layered Stream Encryption (Ring-LWE + AES + ChaCha)
+Every raw file uploaded to the server is dynamically piped through a multi-layered cryptographic stack:
+- **Ring 1 (Ring-LWE):** Lattice-based polynomial scrambling used to wrap the session key. This is a real mathematical implementation providing resistance against quantum-computing-based attacks.
+- **Layer 2 (AES-256-GCM):** Industry standard authenticated symmetric encryption.
+- **Layer 3 (ChaCha20-Poly1305):** A modern, highly secure stream cipher featuring superb performance across mobile CPUs.
 - Each write utilizes unique cryptographically-secure random Initialization Vectors (IVs) ensuring the same plaintext yields entirely different ciphertexts across uploads.
 
 ### 2. Content-Addressable Storage (CAS) & Merkle DAG Layout

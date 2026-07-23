@@ -18,7 +18,8 @@ import {
   FileText, 
   Database,
   Terminal,
-  HelpCircle
+  HelpCircle,
+  HardDrive
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -176,6 +177,31 @@ export function NetworkDocsDrawer({ isOpen, onClose, localPeerId }: NetworkDocsD
                     <p className="text-xs text-indigo-200/60 leading-relaxed">
                       Your files are cryptographically protected and sliced. On local subnets (LAN), discovery occurs instantly via multicast <strong className="text-white font-semibold">mDNS parameters</strong>. To traverse network boundaries, cellular connections, or firewalled networks (WAN), nodes establish encrypted sessions routed via a hybrid HTTP pipeline using standard <strong className="text-white font-semibold">libp2p formatted Multiaddrs</strong>.
                     </p>
+                  </div>
+
+                  {/* WebRTC Multi-Channel Mesh */}
+                  <div className="bg-gradient-to-r from-fuchsia-500/10 to-indigo-500/10 border border-fuchsia-500/20 p-5 rounded-2xl space-y-3">
+                    <span className="text-[10px] font-black text-fuchsia-400 uppercase tracking-widest flex items-center gap-1.5">
+                      <Network className="w-3.5 h-3.5 text-fuchsia-400" /> Secure Transport Protocol
+                    </span>
+                    <h4 className="text-xs font-black text-white uppercase tracking-wider">WebRTC Multi-Channel Mesh & GunJS Handshake</h4>
+                    <p className="text-[11px] text-indigo-200/60 leading-relaxed">
+                      To move data efficiently without relying on centralized intermediaries, the system establishes fully private peer-to-peer data tunnels:
+                    </p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+                      <div className="bg-black/40 border border-white/5 p-3 rounded-xl space-y-1">
+                        <strong className="text-[10px] font-black text-white uppercase tracking-wider block">Direct Connections</strong>
+                        <p className="text-[11px] text-indigo-200/40 leading-relaxed">
+                          Nodes establish encrypted, peer-to-peer UDP/TCP connections directly with each other via browser-native WebRTC DataChannels.
+                        </p>
+                      </div>
+                      <div className="bg-black/40 border border-white/5 p-3 rounded-xl space-y-1">
+                        <strong className="text-[10px] font-black text-white uppercase tracking-wider block">Dynamic handshaking</strong>
+                        <p className="text-[11px] text-indigo-200/40 leading-relaxed">
+                          A lightweight discovery graph (decentralized GunJS) is used solely to exchange initial connection handshakes. Data flows exclusively peer-to-peer.
+                        </p>
+                      </div>
+                    </div>
                   </div>
 
                   {/* Flow Steps */}
@@ -378,9 +404,9 @@ export function NetworkDocsDrawer({ isOpen, onClose, localPeerId }: NetworkDocsD
                   className="space-y-6"
                 >
                   <div className="space-y-4">
-                    <h3 className="text-sm font-black uppercase text-indigo-300">Merkle BlockDAG Fallback WAN Synchronization</h3>
+                    <h3 className="text-sm font-black uppercase text-indigo-300">Mesh Healing: Anti-Entropy Syncing & Audits</h3>
                     <p className="text-xs text-indigo-200/60 leading-relaxed">
-                      When local multicast is blocked, block propagation falls back to hybrid gossip pooling using the active Bootstrap server as a temporary chunk cache:
+                      To guarantee long-term data persistence even when peers disconnect or turn off their devices, connected nodes continuously run real background gossip and reconstruction protocols.
                     </p>
                   </div>
 
@@ -390,9 +416,9 @@ export function NetworkDocsDrawer({ isOpen, onClose, localPeerId }: NetworkDocsD
                       <div className="w-8 h-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
                         <FileText className="w-4 h-4" />
                       </div>
-                      <strong className="text-xs text-white uppercase tracking-wider block">64 KB Block Chunks</strong>
+                      <strong className="text-xs text-white uppercase tracking-wider block">Merkle Tree Auditing</strong>
                       <p className="text-[11px] text-indigo-200/50 leading-relaxed">
-                        To guarantee high-speed, head-of-line blocking protection on files over 20 MB, files are segmented into logical 64KB chunks and hashes compiled inside a local Merkle tree.
+                        Nodes periodically compile their local Origin Private File System (OPFS) shard hashes into a deterministic Merkle Tree, comparing roots with neighbors to quickly locate directory deltas.
                       </p>
                     </div>
 
@@ -400,9 +426,9 @@ export function NetworkDocsDrawer({ isOpen, onClose, localPeerId }: NetworkDocsD
                       <div className="w-8 h-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
                         <Database className="w-4 h-4" />
                       </div>
-                      <strong className="text-xs text-white uppercase tracking-wider block">Outbox Delta Pulling</strong>
+                      <strong className="text-xs text-white uppercase tracking-wider block">Self-Healing Swarm</strong>
                       <p className="text-[11px] text-indigo-200/50 leading-relaxed">
-                        Instead of transferring redundant gigabyte sequences, nodes query the relay server's cached structures, polling only for the exact block ranges missing from local database hashes.
+                        If a shard's replication factor falls below the threshold (e.g., $N=5$), available peers cooperatively fetch $K=3$ remaining shards, decode and rebuild the original chunk, and re-distribute new shards.
                       </p>
                     </div>
                   </div>
@@ -410,10 +436,10 @@ export function NetworkDocsDrawer({ isOpen, onClose, localPeerId }: NetworkDocsD
                   <div className="bg-black/30 border border-indigo-500/10 rounded-2xl p-5 space-y-3">
                     <span className="text-[10px] font-black uppercase text-indigo-400 tracking-wider block">Decentralized Merkle Root Construction</span>
                     <div className="font-mono text-[10px] text-indigo-200/80 space-y-1 bg-black/40 p-4 rounded-xl border border-white/5 leading-normal">
-                      <div>File Root: Build Root from Leaf Hashes [H1, H2, H3, H4]</div>
+                      <div>Deterministic Leaves: sorted( local_shard_hashes )</div>
                       <div className="pl-4 text-white/40">└── Merkle Root = SHA256( SHA256(H1 + H2) + SHA256(H3 + H4) )</div>
-                      <div className="pt-2">State DAG Alignment:</div>
-                      <div className="pl-4 text-white/40">└── Check previousDagHash integrity sequence for chronological continuity.</div>
+                      <div className="pt-2">Cooperative Swarm Reconstruction:</div>
+                      <div className="pl-4 text-white/40">└── Decode( K=3 Shards ) ➔ Re-encode( N=5 Shards ) ➔ Re-distribute missing replicas.</div>
                     </div>
                   </div>
                 </motion.div>
@@ -440,28 +466,51 @@ export function NetworkDocsDrawer({ isOpen, onClose, localPeerId }: NetworkDocsD
                     <div className="grid grid-cols-1 gap-3">
                       <div className="bg-white/[0.02] border border-white/5 p-4 rounded-xl space-y-2">
                         <div className="flex items-center gap-2 mb-1">
-                          <ShieldCheck className="w-4 h-4 text-fuchsia-400" />
-                          <span className="text-xs font-black text-white uppercase tracking-wider">Shamir's Secret Sharing (SSS)</span>
-                        </div>
-                        <p className="text-[11px] text-indigo-200/50 leading-relaxed">
-                          Files are split into <strong className="text-indigo-300">N fragments</strong>. Reconstruction requires a quorum of <strong className="text-indigo-300">K fragments</strong> (where K &lt; N). Even if multiple nodes are compromised, the data remains mathematically unrecoverable without the quorum.
-                        </p>
-                      </div>
-                      <div className="bg-white/[0.02] border border-white/5 p-4 rounded-xl space-y-2">
-                        <div className="flex items-center gap-2 mb-1">
                           <Database className="w-4 h-4 text-fuchsia-400" />
                           <span className="text-xs font-black text-white uppercase tracking-wider">Reed-Solomon Erasure Coding</span>
                         </div>
                         <p className="text-[11px] text-indigo-200/50 leading-relaxed">
-                          Mathematical redundancy is injected into fragments. The system can recover from packet loss or silent bit-rot without re-downloading the complete file from a single source.
+                          Files are split into <strong className="text-indigo-300">N=5 shards</strong>. Reconstruction requires a quorum of any <strong className="text-indigo-300">K=3 shards</strong>. This delivers mathematically optimized storage efficiency while assuring absolute offline resilience.
+                        </p>
+                      </div>
+                      <div className="bg-white/[0.02] border border-white/5 p-4 rounded-xl space-y-2">
+                        <div className="flex items-center gap-2 mb-1">
+                          <ShieldCheck className="w-4 h-4 text-fuchsia-400" />
+                          <span className="text-xs font-black text-white uppercase tracking-wider">Shamir's Secret Sharing (SSS)</span>
+                        </div>
+                        <p className="text-[11px] text-indigo-200/50 leading-relaxed">
+                          Reserved for high-security key orchestration and social recovery. Splits master keys into cryptographic pieces, guaranteeing mathematical isolation without a threshold consensus of trusted guardians.
+                        </p>
+                      </div>
+                      <div className="bg-white/[0.02] border border-white/5 p-4 rounded-xl space-y-2">
+                        <div className="flex items-center gap-2 mb-1">
+                          <Lock className="w-4 h-4 text-fuchsia-400" />
+                          <span className="text-xs font-black text-white uppercase tracking-wider">Privacy by Design</span>
+                        </div>
+                        <p className="text-[11px] text-indigo-200/50 leading-relaxed">
+                          No single peer holds a complete set of shards, and all shards are encrypted with client-side keys before transmission, rendering the data mathematically unreadable to everyone else.
                         </p>
                       </div>
                     </div>
                   </div>
 
+                  {/* OPFS Storage Foundation */}
+                  <div className="space-y-4">
+                    <h4 className="text-[11px] font-black uppercase text-fuchsia-300/50 tracking-wider">2. The Storage Foundation: OPFS (Origin Private File System)</h4>
+                    <div className="bg-white/[0.02] border border-white/5 p-4 rounded-xl space-y-2">
+                      <div className="flex items-center gap-2 mb-1">
+                        <HardDrive className="w-4 h-4 text-fuchsia-400" />
+                        <span className="text-xs font-black text-white uppercase tracking-wider">Browser-Native Private Sandbox</span>
+                      </div>
+                      <p className="text-[11px] text-indigo-200/50 leading-relaxed">
+                        Instead of relying on restricted third-party cloud storage or localStorage (which caps at 5MB), the system utilizes <strong className="text-indigo-300">OPFS</strong>. This is a highly performant, browser-native storage sandbox that reads and writes gigabytes of encrypted shards directly to the user's hard drive via fast, low-latency binary streams. Peers act as physical storage nodes with absolute offline resilience.
+                      </p>
+                    </div>
+                  </div>
+
                   {/* State Management */}
                   <div className="space-y-4">
-                    <h4 className="text-[11px] font-black uppercase text-indigo-300/50 tracking-wider">2. State & Conflict Resolution</h4>
+                    <h4 className="text-[11px] font-black uppercase text-indigo-300/50 tracking-wider">3. State & Conflict Resolution</h4>
                     <div className="bg-black/30 p-5 rounded-2xl border border-indigo-500/10 space-y-4">
                       <div className="flex items-start gap-4">
                         <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center shrink-0">
@@ -477,9 +526,37 @@ export function NetworkDocsDrawer({ isOpen, onClose, localPeerId }: NetworkDocsD
                     </div>
                   </div>
 
+                   {/* Custom DHT (Kademlia XOR Metric) */}
+                  <div className="space-y-4">
+                    <h4 className="text-[11px] font-black uppercase text-amber-400/50 tracking-wider">4. Custom Distributed Hash Table (DHT)</h4>
+                    <div className="bg-amber-400/[0.02] border border-amber-400/10 p-5 rounded-2xl flex flex-col gap-3">
+                      <div className="flex items-center gap-3">
+                        <Terminal className="w-4 h-4 text-amber-400" />
+                        <span className="text-xs font-black text-white uppercase tracking-wider">Kademlia XOR Metric</span>
+                      </div>
+                      <p className="text-[11px] text-indigo-200/60 leading-relaxed">
+                        To scale data discovery and lookup without index servers, the system executes a real <strong className="text-amber-400">Kademlia DHT</strong>.
+                      </p>
+                      <div className="grid grid-cols-1 gap-2 pt-1 text-[11px]">
+                        <div className="bg-black/30 p-3 rounded-xl border border-white/5">
+                          <span className="text-white font-bold block mb-1">256-bit Node IDs & CIDs</span>
+                          Every node is assigned a random 256-bit ID. Every file shard is given a 256-bit Content Identifier (CID) based on its cryptographic hash.
+                        </div>
+                        <div className="bg-black/30 p-3 rounded-xl border border-white/5">
+                          <span className="text-white font-bold block mb-1">Smart XOR Distance Placement</span>
+                          Shards are stored on nodes whose Node IDs are mathematically closest (using an XOR distance calculation: <code className="text-amber-300">d(x,y) = x ⊕ y</code>) to the shard's CID.
+                        </div>
+                        <div className="bg-black/30 p-3 rounded-xl border border-white/5">
+                          <span className="text-white font-bold block mb-1">Iterative Multi-hop Routing</span>
+                          When requesting a file, nodes locate the shard by querying the mathematically closest nodes first, finding and fetching the shard in <code className="text-amber-300">log(N)</code> hops.
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
                   {/* DTN Mechanics */}
                   <div className="space-y-4">
-                    <h4 className="text-[11px] font-black uppercase text-emerald-300/50 tracking-wider">3. Opportunistic Networking (DTN)</h4>
+                    <h4 className="text-[11px] font-black uppercase text-emerald-300/50 tracking-wider">5. Opportunistic Networking (DTN)</h4>
                     <div className="bg-emerald-500/5 border border-emerald-500/10 p-5 rounded-2xl flex flex-col gap-3">
                       <div className="flex items-center gap-3">
                         <Network className="w-4 h-4 text-emerald-400" />
@@ -582,8 +659,8 @@ export function NetworkDocsDrawer({ isOpen, onClose, localPeerId }: NetworkDocsD
                       </div>
                       <div className="grid grid-cols-2 gap-3">
                         <div className="bg-black/20 p-3 rounded-lg border border-white/5 space-y-1">
-                          <span className="text-[10px] font-bold text-white block">QR Cold Storage</span>
-                          <p className="text-[9px] text-indigo-200/40">Convert seed phrases into high-density 2D barcodes for physical etching.</p>
+                          <span className="text-[10px] font-bold text-white block">Hardware Cold Storage</span>
+                          <p className="text-[9px] text-indigo-200/40">Convert seed phrases into encrypted hardware enclave backup tokens for physical storage.</p>
                         </div>
                         <div className="bg-black/20 p-3 rounded-lg border border-white/5 space-y-1">
                           <span className="text-[10px] font-bold text-white block">Steganography</span>

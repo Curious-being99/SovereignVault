@@ -1,11 +1,7 @@
 {
   "name": "Sovereign Recovery Hub",
   "description": "A secure, offline-first decentralized recovery console for E2E encrypted vaults.",
-  "requestFramePermissions": [
-    "camera",
-    "microphone",
-    "geolocation"
-  ],
+  "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]

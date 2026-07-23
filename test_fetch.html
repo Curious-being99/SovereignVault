@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<body>
+<script>
+  window.addEventListener('load', async () => {
+    try {
+      const res = await fetch('/api/files/1', { method: 'DELETE', headers: { 'X-User-Id': '1' } });
+      document.body.innerText = 'Fetch success: ' + res.status;
+    } catch(e) {
+      document.body.innerText = 'Fetch error: ' + (e.stack || String(e));
+    }
+  });
+</script>
+</body>
+</html>

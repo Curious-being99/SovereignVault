@@ -1,3 +1,16 @@
+import { 
+  N, 
+  polyAdd, 
+  polyMul, 
+  sampleSparseNoise, 
+  ringLweEncrypt, 
+  ringLweDecrypt, 
+  runRingLweSelfTest 
+} from './quantum';
+
+// Run self-test on load to verify the lattice mathematics are 100% operational
+const selfTestResult = runRingLweSelfTest();
+console.log(`[Lattice Crypto Initialization] Ring-LWE modulo arithmetic verified: ${selfTestResult.success ? "OK" : "FAILED"}`);
 
 export async function deriveMasterKey(username: string, password: string): Promise<CryptoKey> {
     const encoder = new TextEncoder();
@@ -24,177 +37,6 @@ export async function deriveMasterKey(username: string, password: string): Promi
         true,
         ["encrypt", "decrypt"]
     );
-}
-
-export async function encryptData(data: ArrayBuffer | ArrayBufferLike, password: string): Promise<ArrayBuffer> {
-    const encoder = new TextEncoder();
-    const passwordKey = await crypto.subtle.importKey(
-        "raw",
-        encoder.encode(password),
-        { name: "PBKDF2" },
-        false,
-        ["deriveKey"]
-    );
-    const salt = crypto.getRandomValues(new Uint8Array(16));
-    const key = await crypto.subtle.deriveKey(
-        {
-            name: "PBKDF2",
-            salt,
-            iterations: 1000000,
-            hash: "SHA-512"
-        },
-        passwordKey,
-        { name: "AES-GCM", length: 256 },
-        false,
-        ["encrypt"]
-    );
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-
-    // First layer: Post-Quantum Ring-LWE-inspired deterministic polynomial-ring scrambling
-    const scrambled = await pqRingLweScramble(data as ArrayBuffer, password);
-
-    // Second layer: Military-grade authenticated AES-256-GCM
-    const encrypted = await crypto.subtle.encrypt(
-        { name: "AES-GCM", iv },
-        key,
-        scrambled
-    );
-    
-    // Concatenate Post-Quantum marker [0x50, 0x51, 0x76, 0x31] ('PQv1'), salt, iv, and encrypted data
-    const result = new Uint8Array(4 + salt.length + iv.length + encrypted.byteLength);
-    result[0] = 0x50; // 'P'
-    result[1] = 0x51; // 'Q'
-    result[2] = 0x76; // 'v'
-    result[3] = 0x31; // '1'
-    result.set(salt, 4);
-    result.set(iv, 4 + salt.length);
-    result.set(new Uint8Array(encrypted), 4 + salt.length + iv.length);
-    
-    return result.buffer;
-}
-
-export async function decryptData(encryptedData: ArrayBuffer | ArrayBufferLike, password: string): Promise<ArrayBuffer> {
-    const data = new Uint8Array(encryptedData);
-    
-    // Check for Post-Quantum hybrid marker "PQv1"
-    const isPQ = data.length >= 32 && data[0] === 0x50 && data[1] === 0x51 && data[2] === 0x76 && data[3] === 0x31;
-    
-    let salt: Uint8Array;
-    let iv: Uint8Array;
-    let encryptedContent: Uint8Array;
-    
-    if (isPQ) {
-        salt = data.subarray(4, 20);
-        iv = data.subarray(20, 32);
-        encryptedContent = data.subarray(32);
-    } else {
-        salt = data.subarray(0, 16);
-        iv = data.subarray(16, 28);
-        encryptedContent = data.subarray(28);
-    }
-    
-    const encoder = new TextEncoder();
-    const passwordKey = await crypto.subtle.importKey(
-        "raw",
-        encoder.encode(password),
-        { name: "PBKDF2" },
-        false,
-        ["deriveKey"]
-    );
-    const key = await crypto.subtle.deriveKey(
-        {
-            name: "PBKDF2",
-            salt,
-            iterations: 1000000,
-            hash: "SHA-512"
-        },
-        passwordKey,
-        { name: "AES-GCM", length: 256 },
-        false,
-        ["decrypt"]
-    );
-    
-    const decrypted = await crypto.subtle.decrypt(
-        { name: "AES-GCM", iv },
-        key,
-        encryptedContent
-    );
-
-    if (isPQ) {
-        // Reverse Post-Quantum Ring-LWE scrambling
-        return await pqRingLweUnscramble(decrypted, password);
-    }
-    
-    return decrypted;
-}
-
-/**
- * Post-Quantum Ring-LWE (Learning With Errors) Inspired Hybrid Scrambler.
- * Maps input bytes into a polynomial ring R_q = Z_256[X] / (X^1024 + 1) with dimension N=1024.
- * Computes deterministic polynomial ring shifts and coefficients addition with Small Noise Vector
- * derived from SHA-512 Hash-DRBG keyed off the user's master key.
- */
-async function pqRingLweScramble(data: ArrayBuffer, password: string): Promise<ArrayBuffer> {
-    const dataBytes = new Uint8Array(data);
-    const resultBytes = new Uint8Array(dataBytes.length);
-    
-    const encoder = new TextEncoder();
-    const pwBuffer = encoder.encode(password);
-    const seedBuffer = await crypto.subtle.digest('SHA-512', pwBuffer);
-    const seed = new Uint8Array(seedBuffer);
-    
-    const keyStream = await generateDRBGKeyStream(seed, dataBytes.length);
-    
-    const N = 1024; // Polynomial ring degree
-    const len = dataBytes.length;
-    
-    for (let offset = 0; offset < len; offset += N) {
-        const blockSize = Math.min(N, len - offset);
-        const blockKeyOffset = offset;
-        const shiftAmount = keyStream[blockKeyOffset % keyStream.length] % blockSize;
-        
-        for (let i = 0; i < blockSize; i++) {
-            const origIndex = (i + shiftAmount) % blockSize;
-            const origByte = dataBytes[offset + origIndex];
-            const noise = keyStream[(blockKeyOffset + i) % keyStream.length];
-            
-            resultBytes[offset + i] = (origByte + noise) & 0xFF;
-        }
-    }
-    
-    return resultBytes.buffer;
-}
-
-async function pqRingLweUnscramble(scrambledData: ArrayBuffer, password: string): Promise<ArrayBuffer> {
-    const scrambledBytes = new Uint8Array(scrambledData);
-    const resultBytes = new Uint8Array(scrambledBytes.length);
-    
-    const encoder = new TextEncoder();
-    const pwBuffer = encoder.encode(password);
-    const seedBuffer = await crypto.subtle.digest('SHA-512', pwBuffer);
-    const seed = new Uint8Array(seedBuffer);
-    
-    const keyStream = await generateDRBGKeyStream(seed, scrambledBytes.length);
-    
-    const N = 1024;
-    const len = scrambledBytes.length;
-    
-    for (let offset = 0; offset < len; offset += N) {
-        const blockSize = Math.min(N, len - offset);
-        const blockKeyOffset = offset;
-        const shiftAmount = keyStream[blockKeyOffset % keyStream.length] % blockSize;
-        
-        for (let i = 0; i < blockSize; i++) {
-            const origIndex = (i + shiftAmount) % blockSize;
-            const noise = keyStream[(blockKeyOffset + i) % keyStream.length];
-            
-            const scrambledByte = scrambledBytes[offset + i];
-            const origByte = (scrambledByte - noise + 256) & 0xFF;
-            resultBytes[offset + origIndex] = origByte;
-        }
-    }
-    
-    return resultBytes.buffer;
 }
 
 /**
@@ -225,6 +67,168 @@ async function generateDRBGKeyStream(seed: Uint8Array, length: number): Promise<
     }
     
     return keyStream;
+}
+
+/**
+ * Derives a deterministic Ring-LWE key pair from the user's master password.
+ */
+async function deriveRingLweKeyPair(password: string) {
+    const encoder = new TextEncoder();
+    const pwBuffer = encoder.encode(password);
+    const masterSeed = await crypto.subtle.digest('SHA-512', pwBuffer);
+    const seedBytes = new Uint8Array(masterSeed);
+    
+    // Generate 768 bytes of deterministic keystream to derive parameters:
+    // - a (256 bytes): uniform public ring element
+    // - s (256 bytes): secret noise polynomial
+    // - e (256 bytes): error noise polynomial
+    const keyStream = await generateDRBGKeyStream(seedBytes, 768);
+    
+    const a = keyStream.subarray(0, 256);
+    const sSeed = keyStream.subarray(256, 512);
+    const eSeed = keyStream.subarray(512, 768);
+    
+    const s = sampleSparseNoise(sSeed);
+    const e = sampleSparseNoise(eSeed);
+    
+    // b = a * s + e (mod X^256 + 1)
+    const b = polyAdd(polyMul(a, s), e);
+    
+    return { a, b, s };
+}
+
+/**
+ * Encrypts a file using modern Post-Quantum Hybrid Cryptography:
+ * 1. Derives the user's deterministic Ring-LWE public key (a, b) from the password.
+ * 2. Generates a random 256-bit symmetric file session key K.
+ * 3. Encrypts K using actual Ring-LWE polynomial equations to generate (u, v) (512 bytes).
+ * 4. Encrypts the raw file payload using high-speed AES-256-GCM under the key K.
+ * 5. Returns a structured binary package containing the headers, LWE ciphertext (u,v), and AES ciphertext.
+ */
+export async function encryptData(data: ArrayBuffer | ArrayBufferLike, password: string): Promise<ArrayBuffer> {
+    // 1. Derive user's Ring-LWE public parameters
+    const { a, b } = await deriveRingLweKeyPair(password);
+
+    // 2. Generate a random 32-byte (256-bit) session key
+    const sessionKeyRaw = crypto.getRandomValues(new Uint8Array(32));
+
+    // 3. Encrypt the session key using real Ring-LWE equations
+    const { u, v } = ringLweEncrypt(sessionKeyRaw, a, b);
+
+    // 4. Derive AES-GCM CryptoKey from the raw session key
+    const aesKey = await crypto.subtle.importKey(
+        "raw",
+        sessionKeyRaw,
+        { name: "AES-GCM" },
+        false,
+        ["encrypt"]
+    );
+
+    // 5. Encrypt bulk payload with AES-256-GCM
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const encryptedPayload = await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv },
+        aesKey,
+        data as ArrayBuffer
+    );
+
+    // 6. Concatenate:
+    // - Magic Post-Quantum marker [0x50, 0x51, 0x76, 0x31] ('PQv1') (4 bytes)
+    // - Salt (16 bytes)
+    // - IV (12 bytes)
+    // - Ring-LWE u (256 bytes)
+    // - Ring-LWE v (256 bytes)
+    // - AES-GCM Encrypted Payload (variable bytes)
+    const result = new Uint8Array(4 + 16 + 12 + 256 + 256 + encryptedPayload.byteLength);
+    result[0] = 0x50; // 'P'
+    result[1] = 0x51; // 'Q'
+    result[2] = 0x76; // 'v'
+    result[3] = 0x31; // '1'
+    
+    result.set(salt, 4);
+    result.set(iv, 20);
+    result.set(u, 32);
+    result.set(v, 288);
+    result.set(new Uint8Array(encryptedPayload), 544);
+    
+    return result.buffer;
+}
+
+/**
+ * Decrypts a file package encrypted with Post-Quantum Hybrid Cryptography:
+ * 1. Extracts the magic headers, salt, iv, and the 512-byte Ring-LWE (u, v) package.
+ * 2. Derives the user's deterministic Ring-LWE secret key s from the password.
+ * 3. Decrypts the Ring-LWE ciphertext (u, v) using real polynomial ring subtraction and multiplication to recover K.
+ * 4. Imports K as an AES-GCM key and decrypts the remaining file payload.
+ */
+export async function decryptData(encryptedData: ArrayBuffer | ArrayBufferLike, password: string): Promise<ArrayBuffer> {
+    const data = new Uint8Array(encryptedData);
+    
+    // Check for Post-Quantum hybrid marker "PQv1"
+    const isPQ = data.length >= 544 && data[0] === 0x50 && data[1] === 0x51 && data[2] === 0x76 && data[3] === 0x31;
+    
+    if (!isPQ) {
+        // Fallback for legacy files
+        const salt = data.subarray(0, 16);
+        const iv = data.subarray(16, 28);
+        const encryptedContent = data.subarray(28);
+        
+        const encoder = new TextEncoder();
+        const passwordKey = await crypto.subtle.importKey(
+            "raw",
+            encoder.encode(password),
+            { name: "PBKDF2" },
+            false,
+            ["deriveKey"]
+        );
+        const legacyKey = await crypto.subtle.deriveKey(
+            {
+                name: "PBKDF2",
+                salt,
+                iterations: 1000000,
+                hash: "SHA-512"
+            },
+            passwordKey,
+            { name: "AES-GCM", length: 256 },
+            false,
+            ["decrypt"]
+        );
+        return await crypto.subtle.decrypt(
+            { name: "AES-GCM", iv },
+            legacyKey,
+            encryptedContent
+        );
+    }
+    
+    // Parse Ring-LWE and AES components
+    const salt = data.subarray(4, 20);
+    const iv = data.subarray(20, 32);
+    const u = data.subarray(32, 288);
+    const v = data.subarray(288, 544);
+    const encryptedPayload = data.subarray(544);
+
+    // 1. Derive user's deterministic Ring-LWE secret parameter s from password
+    const { s } = await deriveRingLweKeyPair(password);
+
+    // 2. Decrypt symmetric session key using real Ring-LWE polynomial mathematics
+    const recoveredSessionKeyRaw = ringLweDecrypt(u, v, s);
+
+    // 3. Derive AES CryptoKey from the recovered session key
+    const aesKey = await crypto.subtle.importKey(
+        "raw",
+        recoveredSessionKeyRaw,
+        { name: "AES-GCM" },
+        false,
+        ["decrypt"]
+    );
+
+    // 4. Decrypt bulk file payload using hardware-accelerated Web Crypto API
+    return await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv },
+        aesKey,
+        encryptedPayload
+    );
 }
 
 export async function computeFileHash(data: ArrayBuffer): Promise<string> {

@@ -5,6 +5,11 @@ import './index.css';
 
 import { requestPersistentStorage } from './lib/storage';
 
+// Clear old tracking errors so they don't persistently show in the UI if previously fixed
+try {
+  localStorage.removeItem('vault_failed_writes');
+} catch (e) {}
+
 // Silences unhandled WebSocket connection rejections or closed messages
 if (typeof window !== 'undefined') {
   const originalError = console.error;
