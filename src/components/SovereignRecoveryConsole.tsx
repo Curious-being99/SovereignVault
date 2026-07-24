@@ -22,7 +22,9 @@ import {
   ChevronRight, 
   RefreshCw,
   HardDrive,
-  Download
+  Download,
+  Eye,
+  EyeOff
 } from "lucide-react";
 import { api } from "../lib/api";
 import { saveLocalFile } from "../lib/storage";
@@ -76,6 +78,7 @@ export const SovereignRecoveryConsole: React.FC<SovereignRecoveryConsoleProps> =
   const [password, setPassword] = useState("");
   const [systemMasterKey, setSystemMasterKey] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [showSystemMasterKey, setShowSystemMasterKey] = useState(false);
   const [stage, setStage] = useState<"auth" | "deriving" | "indexing" | "complete">("auth");
   const [indexingStatus, setIndexingStatus] = useState("Initializing indexing pipeline...");
   const [errorMsg, setErrorMsg] = useState("");
@@ -300,15 +303,29 @@ export const SovereignRecoveryConsole: React.FC<SovereignRecoveryConsoleProps> =
   };
 
   const totalFilesCount = packData?.files?.length || 0;
-  const totalFilesSize = packData?.files?.reduce((acc, f) => acc + (f?.size || 0), 0) || 0;
+  const totalFilesSize = packData?.files?.reduce((acc, f) => {
+    let s = f?.size || 0;
+    if (s === 0 && f?.data) {
+      if (typeof f.data === 'string') s = Math.floor(f.data.length * 0.75);
+      else if (f.data instanceof ArrayBuffer) s = f.data.byteLength;
+      else if (ArrayBuffer.isView(f.data)) s = f.data.byteLength;
+    }
+    return acc + s;
+  }, 0) || 0;
   
   // Format bytes helper
-  const formatBytes = (bytes: number) => {
-    if (!bytes || bytes === 0) return "0 Bytes";
+  const formatBytes = (bytes: number, fileObj?: any) => {
+    let b = bytes;
+    if ((!b || b === 0) && fileObj?.data) {
+      if (typeof fileObj.data === 'string') b = Math.floor(fileObj.data.length * 0.75);
+      else if (fileObj.data instanceof ArrayBuffer) b = fileObj.data.byteLength;
+      else if (ArrayBuffer.isView(fileObj.data)) b = fileObj.data.byteLength;
+    }
+    if (!b || b === 0) return fileObj?.isFolder ? "Folder" : "0 Bytes";
     const k = 1024;
     const sizes = ["Bytes", "KB", "MB", "GB"];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+    const i = Math.floor(Math.log(b) / Math.log(k));
+    return parseFloat((b / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
   };
 
   // Filtered files for search
@@ -350,7 +367,7 @@ export const SovereignRecoveryConsole: React.FC<SovereignRecoveryConsoleProps> =
         </div>
 
         {/* Dynamic Stages View */}
-        <div className="flex-1 flex flex-col">
+        <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
           <AnimatePresence mode="wait">
             
             {/* Stage 1: Password Auth and Verify */}
@@ -360,7 +377,7 @@ export const SovereignRecoveryConsole: React.FC<SovereignRecoveryConsoleProps> =
                 initial={{ opacity: 0, y: 30 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -30 }}
-                className="p-6 sm:p-16 flex flex-col items-center justify-center max-w-xl mx-auto text-center flex-1 w-full space-y-6 sm:space-y-10 overflow-y-auto"
+                className="p-6 sm:p-16 flex flex-col items-center justify-start sm:justify-center max-w-xl mx-auto text-center flex-1 w-full space-y-6 sm:space-y-10 overflow-y-auto pb-12"
               >
                 <div className="p-6 sm:p-8 bg-slate-950 border border-slate-800 rounded-[24px] sm:rounded-[32px] relative group shadow-2xl">
                   <div className="absolute inset-0 bg-emerald-500/5 blur-3xl rounded-full" />
@@ -390,8 +407,16 @@ export const SovereignRecoveryConsole: React.FC<SovereignRecoveryConsoleProps> =
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       placeholder="Master Seed Password"
-                      className="w-full h-14 sm:h-20 bg-slate-950 border-2 border-slate-800 focus:ring-4 focus:ring-emerald-500/10 focus:border-emerald-500 rounded-[16px] sm:rounded-[24px] px-6 sm:px-8 text-white text-center font-black text-lg sm:text-xl focus:outline-none transition-all placeholder:text-slate-800 shadow-inner"
+                      className="w-full h-14 sm:h-20 bg-slate-950 border-2 border-slate-800 focus:ring-4 focus:ring-emerald-500/10 focus:border-emerald-500 rounded-[16px] sm:rounded-[24px] px-6 sm:px-8 pr-14 text-white text-center font-black text-lg sm:text-xl focus:outline-none transition-all placeholder:text-slate-800 shadow-inner"
                     />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                      className="absolute right-5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white transition-colors"
+                      title={showPassword ? "Hide password" : "Reveal password"}
+                    >
+                      {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                    </button>
                   </div>
 
                   <div className="relative group text-left">
@@ -399,13 +424,23 @@ export const SovereignRecoveryConsole: React.FC<SovereignRecoveryConsoleProps> =
                       <Server className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-slate-500" />
                       <label className="text-[9px] sm:text-[10px] font-black text-slate-500 uppercase tracking-widest">Server Migration Key (Optional)</label>
                     </div>
-                    <input 
-                      type="password"
-                      value={systemMasterKey}
-                      onChange={(e) => setSystemMasterKey(e.target.value)}
-                      placeholder="Default: qs-lite-master-secure-key-2026"
-                      className="w-full h-12 sm:h-14 bg-slate-950/60 border-2 border-slate-800 focus:ring-4 focus:ring-indigo-500/10 rounded-[12px] sm:rounded-[20px] px-4 sm:px-6 text-white text-center font-mono text-[10px] sm:text-xs focus:outline-none transition-all placeholder:text-slate-800"
-                    />
+                    <div className="relative">
+                      <input 
+                        type={showSystemMasterKey ? "text" : "password"}
+                        value={systemMasterKey}
+                        onChange={(e) => setSystemMasterKey(e.target.value)}
+                        placeholder="Default: qs-lite-master-secure-key-2026"
+                        className="w-full h-12 sm:h-14 bg-slate-950/60 border-2 border-slate-800 focus:ring-4 focus:ring-indigo-500/10 rounded-[12px] sm:rounded-[20px] px-4 sm:px-6 pr-12 text-white text-center font-mono text-[10px] sm:text-xs focus:outline-none transition-all placeholder:text-slate-800"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowSystemMasterKey(!showSystemMasterKey)}
+                        className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white transition-colors"
+                        title={showSystemMasterKey ? "Hide key" : "Reveal key"}
+                      >
+                        {showSystemMasterKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
                   </div>
 
                   <button 
@@ -542,7 +577,7 @@ export const SovereignRecoveryConsole: React.FC<SovereignRecoveryConsoleProps> =
                                 {file?.name || "Unnamed Block"}
                               </span>
                               <div className="flex items-center gap-2 font-mono text-[10px] text-slate-500">
-                                <span className="font-bold text-slate-400">{formatBytes(file?.size || 0)}</span>
+                                <span className="font-bold text-slate-400">{formatBytes(file?.size || 0, file)}</span>
                                 <span className="opacity-20">•</span>
                                 <span className="font-mono text-slate-600 truncate max-w-[120px]" title={file?.dagHash || ""}>
                                   {(file?.dagHash || "GENESIS_HASH_000000").slice(0, 16)}...
@@ -639,7 +674,7 @@ export const SovereignRecoveryConsole: React.FC<SovereignRecoveryConsoleProps> =
                 initial={{ opacity: 0, scale: 0.98, y: 20 }}
                 animate={{ opacity: 1, scale: 1, y: 0 }}
                 exit={{ opacity: 0 }}
-                className="p-6 sm:p-20 flex flex-col items-center justify-center max-w-2xl mx-auto text-center flex-1 w-full space-y-8 sm:space-y-12 overflow-y-auto"
+                className="p-6 sm:p-20 flex flex-col items-center justify-start sm:justify-center max-w-2xl mx-auto text-center flex-1 w-full space-y-6 sm:space-y-8 overflow-y-auto pb-16 sm:pb-24"
               >
                 <div className="p-6 sm:p-10 bg-emerald-500/10 border-2 border-emerald-500/20 rounded-[32px] sm:rounded-[48px] shadow-[0_0_60px_rgba(16,185,129,0.15)] relative">
                   <div className="absolute inset-0 bg-emerald-500/5 blur-3xl rounded-full animate-pulse" />

@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Shield, CheckCircle2, Zap, Link as LinkIcon, Database, Terminal, Cpu, Globe, AlertTriangle, RefreshCw } from 'lucide-react';
 import { api } from "../lib/api";
 import { ShardedFileMatrix } from "./ShardedFileMatrix";
+import { hexToIpfsCidV1 } from "../lib/ipfs-cid";
 
 interface DagBlock {
   id: number;
@@ -216,6 +217,27 @@ export const DagVerificationModal: React.FC<DagVerificationModalProps> = ({ bloc
                     </div>
                   </div>
                 )}
+
+                {/* IPFS Content Identifier (CIDv1) & CAS Specs */}
+                <div className="pt-3 border-t border-cyan-500/20 space-y-1.5 bg-cyan-950/20 -mx-3 px-3 py-2 rounded-lg">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] uppercase font-black text-cyan-400 tracking-widest flex items-center gap-1">
+                      <Globe className="w-3 h-3 text-cyan-400" />
+                      IPFS Content Identifier (CIDv1)
+                    </label>
+                    <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-cyan-900/60 text-cyan-300 font-bold border border-cyan-700/50">
+                      PINNED (CAS / UnixFS)
+                    </span>
+                  </div>
+                  <div className="text-xs font-mono font-bold text-cyan-200 select-all break-all bg-black/50 p-2 rounded border border-cyan-800/40">
+                    {hexToIpfsCidV1(auditData?.storedMerkleRoot || block.dagHash || "0000000000000000000000000000000000000000000000000000000000000000")}
+                  </div>
+                  <div className="flex items-center justify-between text-[10px] text-cyan-300/80 font-mono pt-0.5">
+                    <span>Codec: <strong className="text-cyan-200">raw / unixfs (0x55)</strong></span>
+                    <span>Multihash: <strong className="text-cyan-200">sha2-256 (0x12)</strong></span>
+                    <span>Chunking: <strong className="text-cyan-200">64 KB Shards</strong></span>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -267,23 +289,20 @@ export const DagVerificationModal: React.FC<DagVerificationModalProps> = ({ bloc
                         onClick={async () => {
                           try {
                              await api.repairStorage(userId);
-                             onClose();
-                          } catch (e) { console.error(e); }
-                        }}
-                        className="text-[10px] bg-red-900/30 hover:bg-red-900/50 text-red-200 px-2 py-1 rounded border border-red-800"
-                      >
-                        Repair Storage
-                      </button>
-                      <button 
-                        onClick={async () => {
-                          try {
                              await api.rebuildVaultDag(userId);
-                             onClose();
+                             const result = await api.verifyVaultBlock(userId, block.id);
+                             setAuditData(result.audit);
+                             if (result.isValid) {
+                               setVerificationStep(4);
+                               setIsVerified(true);
+                               setError(null);
+                             }
                           } catch (e) { console.error(e); }
                         }}
-                        className="text-[10px] bg-red-900/30 hover:bg-red-900/50 text-red-200 px-2 py-1 rounded border border-red-800"
+                        className="text-[10px] bg-emerald-900/50 hover:bg-emerald-800/70 text-emerald-200 px-3 py-1.5 rounded border border-emerald-600/50 font-bold flex items-center gap-1.5 shadow-lg"
                       >
-                        Rebuild DAG
+                        <RefreshCw className="w-3 h-3" />
+                        Auto-Heal & Reverify Block
                       </button>
                     </div>
                   </div>

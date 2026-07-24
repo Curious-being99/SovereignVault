@@ -135,14 +135,36 @@ function bufferToBase64(buffer: ArrayBuffer): string {
   return window.btoa(binary);
 }
 
-// Helper to convert Base64 to ArrayBuffer
-function base64ToBuffer(base64: string): ArrayBuffer {
-  const binary = window.atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
+// Helper to convert Base64, Uint8Array, or ArrayBufferView to ArrayBuffer
+function base64ToBuffer(input: any): ArrayBuffer {
+  if (!input) return new ArrayBuffer(0);
+  if (input instanceof ArrayBuffer) return input;
+  if (ArrayBuffer.isView(input)) {
+    const ab = new ArrayBuffer(input.byteLength);
+    new Uint8Array(ab).set(new Uint8Array(input.buffer, input.byteOffset, input.byteLength));
+    return ab;
   }
-  return bytes.buffer;
+  if (typeof input === 'object' && input.type === 'Buffer' && Array.isArray(input.data)) {
+    const bytes = new Uint8Array(input.data);
+    const ab = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(ab).set(bytes);
+    return ab;
+  }
+  if (typeof input === 'string') {
+    try {
+      const clean = input.trim().replace(/^data:.*?;base64,/, "");
+      const binary = window.atob(clean);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return bytes.buffer;
+    } catch (e) {
+      console.warn("base64ToBuffer decoding error:", e);
+      return new ArrayBuffer(0);
+    }
+  }
+  return new ArrayBuffer(0);
 }
 
 function getCurrentUserId(): string {
@@ -1122,19 +1144,7 @@ export const api = {
             let fileBuffer: ArrayBuffer;
             if (f.data) {
               try {
-                if (f.data instanceof ArrayBuffer) {
-                  fileBuffer = f.data;
-                } else if (typeof f.data === 'string') {
-                  const binaryString = window.atob(f.data);
-                  const len = binaryString.length;
-                  const bytes = new Uint8Array(len);
-                  for (let i = 0; i < len; i++) {
-                    bytes[i] = binaryString.charCodeAt(i);
-                  }
-                  fileBuffer = bytes.buffer;
-                } else {
-                  fileBuffer = new ArrayBuffer(0);
-                }
+                fileBuffer = base64ToBuffer(f.data);
               } catch (decErr) {
                 console.error("Failed to decode offline backup file data:", f.name, decErr);
                 fileBuffer = new ArrayBuffer(0);
@@ -1143,13 +1153,15 @@ export const api = {
               fileBuffer = new ArrayBuffer(0);
             }
 
+            const fileSize = (typeof f.size === "number" && f.size > 0) ? f.size : (fileBuffer.byteLength || 0);
+
             const localFile = {
               userId: data.user.id,
               privateVaultId: data.user.privateVaultId || f.privateVaultId,
               name: f.name,
               data: fileBuffer,
               type: f.type || "application/octet-stream",
-              size: typeof f.size === "number" ? f.size : (fileBuffer.byteLength || 0),
+              size: fileSize,
               folderPath: f.folderPath || "/",
               isFolder: !!f.isFolder,
               isShared: !!f.isShared,

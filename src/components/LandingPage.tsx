@@ -72,6 +72,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
   const [authMode, setAuthMode] = useState<"landing" | "register" | "login">("landing");
   const [isDraggingImport, setIsDraggingImport] = useState(false);
   const [showRecoveryDesk, setShowRecoveryDesk] = useState(false);
+  const [showRecoverPin, setShowRecoverPin] = useState(false);
   const [recoveryTab, setRecoveryTab] = useState<"upload" | "paste" | "seed" | "sovereign">("upload");
   const [pastedPackText, setPastedPackText] = useState("");
   const [recoverUsername, setRecoverUsername] = useState("");
@@ -1071,13 +1072,23 @@ export const LandingPage: React.FC<LandingPageProps> = ({
 
                       <div className="space-y-2">
                         <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">New Unlock Password / PIN</label>
-                        <input
-                          type="password"
-                          value={recoverPin}
-                          onChange={(e) => setRecoverPin(e.target.value)}
-                          placeholder="Secure local storage context"
-                          className="w-full h-14 bg-slate-950 border-2 border-slate-800 rounded-2xl px-5 text-sm text-white focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all placeholder:text-slate-800"
-                        />
+                        <div className="relative">
+                          <input
+                            type={showRecoverPin ? "text" : "password"}
+                            value={recoverPin}
+                            onChange={(e) => setRecoverPin(e.target.value)}
+                            placeholder="Secure local storage context"
+                            className="w-full h-14 bg-slate-950 border-2 border-slate-800 rounded-2xl px-5 pr-12 text-sm text-white focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all placeholder:text-slate-800"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowRecoverPin(!showRecoverPin)}
+                            className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-600 hover:text-white transition-colors"
+                            title={showRecoverPin ? "Hide PIN" : "Reveal PIN"}
+                          >
+                            {showRecoverPin ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                          </button>
+                        </div>
                       </div>
                     </div>
 

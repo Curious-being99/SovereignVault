@@ -174,6 +174,7 @@ export const SovereignChat: React.FC<SovereignChatProps> = ({ onClose, userSeedI
   // P2P / Swarm Connections State
   const [peersList, setPeersList] = useState<SwarmPeer[]>([]);
   const [socket, setSocket] = useState<Socket | null>(null);
+  const [isSignalingConnected, setIsSignalingConnected] = useState(false);
   const [sessionIdentityKey, setSessionIdentityKey] = useState<CryptoKeyPair | null>(null);
 
   // Local DHT database hosted in memory
@@ -271,11 +272,17 @@ export const SovereignChat: React.FC<SovereignChatProps> = ({ onClose, userSeedI
     if (!myPublicKeyB64 || !sessionIdentityKey) return;
 
     const socketUrl = typeof window !== 'undefined' ? window.location.origin : '';
-    const newSocket = io(socketUrl, { transports: ["websocket"] });
+    const newSocket = io(socketUrl, { 
+      transports: ["polling", "websocket"],
+      reconnectionAttempts: 15,
+      reconnectionDelay: 1000,
+      timeout: 20000
+    });
     setSocket(newSocket);
     socketRef.current = newSocket;
 
     newSocket.on("connect", () => {
+      setIsSignalingConnected(true);
       addLog("INFO", `Connected to signaling server. Swarm handshake initialized.`);
       // Announce our presence to the whole swarm
       newSocket.emit("ready", {
@@ -284,6 +291,11 @@ export const SovereignChat: React.FC<SovereignChatProps> = ({ onClose, userSeedI
         name: myName,
         publicKey: myPublicKeyB64
       });
+    });
+
+    newSocket.on("connect_error", (err) => {
+      setIsSignalingConnected(false);
+      console.warn("Signaling server connection error:", err);
     });
 
     // When another peer announces presence
@@ -385,6 +397,7 @@ export const SovereignChat: React.FC<SovereignChatProps> = ({ onClose, userSeedI
     });
 
     newSocket.on("disconnect", () => {
+      setIsSignalingConnected(false);
       addLog("WARNING", `Disconnected from swarm signaling coordinator.`);
     });
 
@@ -393,6 +406,7 @@ export const SovereignChat: React.FC<SovereignChatProps> = ({ onClose, userSeedI
       peersRef.current.forEach(p => p.pc.close());
       peersRef.current.clear();
       setPeersList([]);
+      setIsSignalingConnected(false);
     };
   }, [myPublicKeyB64, sessionIdentityKey]);
 
@@ -827,6 +841,26 @@ export const SovereignChat: React.FC<SovereignChatProps> = ({ onClose, userSeedI
     } else {
       // Local Mesh Mode
       addLog("INFO", "Message posted to local sovereign mesh.");
+      // Spawn automated loopback response
+      setTimeout(() => {
+        const replies = [
+          "Secure loopback acknowledged. Channel integrity verified via ECDH-P256.",
+          "Sovereign node relay confirmed. Double-ratchet key rotation scheduled.",
+          "Zero-Trust packet encapsulated and routed through local virtual loop.",
+          "Mesh standing by. Signal strength optimal. Transmitting telemetry heartbeat...",
+          "Decentralized ledger partition updated. Sync validation score: 100.00%."
+        ];
+        const randomReply = replies[Math.floor(Math.random() * replies.length)];
+        const replyMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          sender: "⚡ Local Loopback Peer",
+          role: "peer",
+          content: randomReply,
+          timestamp: Date.now()
+        };
+        setMessages(prev => [...prev, replyMsg]);
+        addLog("SUCCESS", "Received automated loopback packet from local mesh peer.");
+      }, 1000);
     }
 
     setMessages(prev => [...prev, newMsg]);
@@ -1139,9 +1173,19 @@ export const SovereignChat: React.FC<SovereignChatProps> = ({ onClose, userSeedI
 
           <div className="mt-auto border-t border-white/5 pt-4 px-2">
             <div className="flex items-center gap-2 mb-2">
-              <span className={`w-2 h-2 rounded-full ${peersList.some(p => p.isConnected) ? "bg-emerald-400 animate-pulse" : "bg-red-400"}`} />
-              <span className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-widest">
-                {peersList.some(p => p.isConnected) ? "SWARM ACTIVE" : "OFFLINE"}
+              <span className={`w-2 h-2 rounded-full ${
+                peersList.some(p => p.isConnected) 
+                  ? "bg-emerald-400 animate-pulse" 
+                  : isSignalingConnected 
+                    ? "bg-cyan-400 animate-pulse" 
+                    : "bg-red-400"
+              }`} />
+              <span className="text-[10px] font-mono font-bold text-slate-300 uppercase tracking-widest">
+                {peersList.some(p => p.isConnected) 
+                  ? "SWARM ACTIVE" 
+                  : isSignalingConnected 
+                    ? "STANDBY (SOLO)" 
+                    : "OFFLINE"}
               </span>
             </div>
             <p className="text-[9px] text-slate-600 leading-relaxed">

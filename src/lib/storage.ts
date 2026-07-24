@@ -432,24 +432,45 @@ async function deleteOpfsBlob(id: string | number) {
 export async function saveLocalFile(file: any) {
   await ensureEngine();
   
-  // Extract data to save natively if OPFS is supported
-  let hasOpfsNativeBlob = false;
-  const metadataToSave = { ...file };
+  let metadataToSave = { ...file };
 
+  let bufferToSave: ArrayBuffer | null = null;
   if (file.data instanceof ArrayBuffer) {
+    bufferToSave = file.data;
+  } else if (ArrayBuffer.isView(file.data)) {
+    const ab = new ArrayBuffer(file.data.byteLength);
+    new Uint8Array(ab).set(new Uint8Array(file.data.buffer, file.data.byteOffset, file.data.byteLength));
+    bufferToSave = ab;
+  } else if (typeof file.data === 'string' && file.data.length > 0) {
+    try {
+      const clean = file.data.trim().replace(/^data:.*?;base64,/, "");
+      const binary = window.atob(clean);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      bufferToSave = bytes.buffer;
+    } catch (e) {}
+  }
+
+  if (bufferToSave) {
+    if (!metadataToSave.size || metadataToSave.size === 0) {
+      metadataToSave.size = bufferToSave.byteLength;
+    }
     if (!metadataToSave.id) {
        metadataToSave.id = Date.now() + Math.floor(Math.random() * 100000);
     }
-    const success = await writeOpfsBlob(metadataToSave.id, file.data);
+    const success = await writeOpfsBlob(metadataToSave.id, bufferToSave);
     if (success) {
       metadataToSave._opfsNative = true;
       delete metadataToSave.data;
-      hasOpfsNativeBlob = true;
+    } else {
+      metadataToSave.data = bufferToSave;
     }
 
     if (isHardwareMounted() && file.name && !file.isFolder) {
       try {
-        await saveToHardware(file.name, new Blob([file.data], { type: file.type || "application/octet-stream" }));
+        await saveToHardware(file.name, new Blob([bufferToSave], { type: file.type || "application/octet-stream" }));
       } catch (hwSaveErr) {
         console.warn("[StorageEngine] Auto-save file to mounted hardware folder failed:", hwSaveErr);
       }
@@ -500,6 +521,9 @@ export async function getLocalFile(fileId: number) {
      const nativeData = await readOpfsBlob(fileId);
      if (nativeData) {
         result.data = nativeData;
+        if (!result.size || result.size === 0) {
+          result.size = nativeData.byteLength;
+        }
      } else {
         console.error(`[StorageEngine] Native OPFS blob missing for file ${fileId}`);
      }

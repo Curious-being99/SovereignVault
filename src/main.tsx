@@ -4,6 +4,10 @@ import App from './App.tsx';
 import './index.css';
 
 import { requestPersistentStorage } from './lib/storage';
+import { RuntimeShield } from './lib/runtime-shield';
+
+// Initialize Client Anti-Tamper & Quantum-Resistant Security Shield
+RuntimeShield.initializeSecurityShield();
 
 // Clear old tracking errors so they don't persistently show in the UI if previously fixed
 try {

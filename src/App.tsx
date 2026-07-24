@@ -401,6 +401,7 @@ export default function App() {
   const filesRef = useRef<FileData[]>([]);
   const isRefreshingRef = useRef(false);
   const isSystemActionRef = useRef(false);
+  const pendingUploadNamesRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     filesRef.current = files;
@@ -519,6 +520,10 @@ export default function App() {
       showToast("Decentralized Master Keypack exported successfully!", "success");
     } catch (err: any) {
       showToast(err.message || "Failed to compile backup pack.", "error");
+    } finally {
+      setTimeout(() => {
+        isSystemActionRef.current = false;
+      }, 2000);
     }
   };
 
@@ -614,14 +619,7 @@ export default function App() {
         localStorage.setItem("vault_session_password", password);
 
         // Automatically attempt to register biometric/passkey
-        if (isWebBiometricSupported()) {
-          try {
-            await saveWebBiometric(res.user.username, password);
-            showToast("Passkey registered for hardware security.", "success");
-          } catch (biomErr) {
-            console.warn("Auto-biometric registration skipped:", biomErr);
-          }
-        }
+        await saveBiometricCredentials(res.user.username, password);
 
         // Refresh users list
         const list = await api.getAllUsers();
@@ -753,14 +751,7 @@ export default function App() {
       showToast(`Restored identity @${cleanUsername}! Recovered & linked ${linkedCount} files.`, "success");
 
       // Automatically attempt to register biometric/passkey
-      if (isWebBiometricSupported()) {
-        try {
-          await saveWebBiometric(cleanUsername, cleanPin);
-          showToast("Passkey registered for hardware security.", "success");
-        } catch (biomErr) {
-          console.warn("Auto-biometric registration skipped:", biomErr);
-        }
-      }
+      await saveBiometricCredentials(cleanUsername, cleanPin);
 
       // Set session & auto-login
       await deriveMasterKey(cleanUsername, cleanPin);
@@ -802,6 +793,10 @@ export default function App() {
       showToast("Physical database (.db) downloaded successfully!", "success");
     } catch (err: any) {
       showToast(err.message || "Failed to download database file.", "error");
+    } finally {
+      setTimeout(() => {
+        isSystemActionRef.current = false;
+      }, 2000);
     }
   };
 
@@ -1904,6 +1899,35 @@ export default function App() {
       setNotification(null);
     }, 4500);
   }, []);
+
+  const saveBiometricCredentials = useCallback(async (username: string, passwordVal: string) => {
+    const isNative = !!(window as any).Capacitor?.isNative;
+    if (isNative) {
+      try {
+        const NativeBiometric = (window as any).Capacitor?.Plugins?.NativeBiometric;
+        if (NativeBiometric) {
+          const { isAvailable } = await NativeBiometric.isAvailable();
+          if (isAvailable) {
+            await NativeBiometric.setCredentials({
+              username: username,
+              password: passwordVal,
+              server: "QuantumSecureVault",
+            });
+            showToast("Native biometric registered successfully.", "success");
+          }
+        }
+      } catch (biomErr) {
+        console.warn("Auto-native biometric registration failed:", biomErr);
+      }
+    } else if (isWebBiometricSupported()) {
+      try {
+        await saveWebBiometric(username, passwordVal);
+        showToast("Passkey registered for hardware security.", "success");
+      } catch (biomErr) {
+        console.warn("Auto-biometric registration skipped:", biomErr);
+      }
+    }
+  }, [showToast]);
 
   const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
 
@@ -3538,15 +3562,7 @@ export default function App() {
       setSessionPassword(passwordInput);
 
       // Automatically attempt to register biometric/passkey
-      if (isWebBiometricSupported()) {
-        try {
-          showToast("🛡️ Registering hardware security anchor...", "info");
-          await saveWebBiometric(cleanUsername, passwordInput);
-          showToast("Passkey registered for hardware security.", "success");
-        } catch (biomErr) {
-          console.warn("Auto-biometric registration skipped:", biomErr);
-        }
-      }
+      await saveBiometricCredentials(cleanUsername, passwordInput);
 
       setUsernameInput("");
       setPasswordInput("");
@@ -3588,16 +3604,13 @@ export default function App() {
       
       // Attempt to save biometric credentials if available
       try {
-        // Check if platform supports biometric auto-registration (Web Passkeys)
-        if (isWebBiometricSupported()) {
+        const isNative = !!(window as any).Capacitor?.isNative;
+        if (isNative) {
+          await saveBiometricCredentials(cleanUsername, passwordInput);
+        } else if (isWebBiometricSupported()) {
           const alreadyHas = await hasWebBiometric(cleanUsername);
           if (!alreadyHas) {
-            showToast("🛡️ Initializing hardware security anchor...", "info");
-            const ok = await saveWebBiometric(cleanUsername, passwordInput);
-            if (ok) {
-              console.log("Credentials securely encrypted in non-extractable Web Biometric Enclave.");
-              showToast("Passkey registered for this device.", "success");
-            }
+            await saveBiometricCredentials(cleanUsername, passwordInput);
           }
         }
       } catch (e) {
@@ -3644,6 +3657,10 @@ export default function App() {
         showToast("Username required for biometric login.", "error");
       }
       return;
+    }
+
+    if (!isAutoAttempt) {
+      isSystemActionRef.current = false;
     }
 
     // Set system action to prevent visibility-change loops during native prompts
@@ -3824,19 +3841,20 @@ export default function App() {
           backgroundLockTimerRef.current = null;
         }
 
-        if (isSystemActionRef.current) {
-          console.log("[Security] System action active, deferring biometric challenge.");
-          return;
-        }
-        if (biometricAutoUnlock && currentUser && !sessionPassword) {
-          // Attempt to auto-unlock using Passkeys
-          console.log("[Security] Foregrounding detected. Initiating Passkey challenge.");
-          setTimeout(() => {
-            if (!isSystemActionRef.current) {
+        // Auto-heal any stale system action locks when coming back to the foreground,
+        // and safely run the biometric challenge if locked and biometric is available.
+        setTimeout(async () => {
+          isSystemActionRef.current = false;
+
+          if (currentUser && !sessionPassword) {
+            const isNative = !!(window as any).Capacitor?.isNative;
+            const hasSaved = isNative ? true : await hasWebBiometric(currentUser.username);
+            if (biometricAutoUnlock || hasSaved) {
+              console.log("[Security] Foregrounding detected while locked. Initiating Passkey challenge.");
               handleBiometricLogin(currentUser.username, true);
             }
-          }, 500);
-        }
+          }
+        }, 800);
       }
     };
 
@@ -3847,21 +3865,35 @@ export default function App() {
       }
     };
 
+    const handleWindowFocus = () => {
+      // Auto-heal any stale system action locks when window gets focused
+      setTimeout(() => {
+        isSystemActionRef.current = false;
+      }, 800);
+    };
+
     document.addEventListener("visibilitychange", handleVisibilityChange);
     window.addEventListener("beforeunload", handleBeforeUnload);
+    window.addEventListener("focus", handleWindowFocus);
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("beforeunload", handleBeforeUnload);
+      window.removeEventListener("focus", handleWindowFocus);
     };
   }, [biometricAutoUnlock, currentUser, sessionPassword, handleBiometricLogin, activeTransfers]);
 
   // Auto-unlock on initial app launch or when locked if biometric auto-unlock is enabled OR if they have saved credentials
   useEffect(() => {
     if (currentUser && !sessionPassword) {
+      if (document.visibilityState !== "visible") {
+        console.log("[Security] Deferring biometric auto-challenge because document is hidden.");
+        return;
+      }
       let isSubscribed = true;
       const checkAndChallenge = async () => {
         try {
-          const hasSaved = await hasWebBiometric(currentUser.username);
+          const isNative = !!(window as any).Capacitor?.isNative;
+          const hasSaved = isNative ? true : await hasWebBiometric(currentUser.username);
           if (isSubscribed && (biometricAutoUnlock || hasSaved)) {
             console.log("[Security] Lock screen active and biometric capability detected. Auto-challenging...");
             setTimeout(() => {
@@ -4022,14 +4054,8 @@ export default function App() {
         setSessionPassword(editNewPassword);
 
         // Automatically attempt to update biometric/passkey with new password
-        if (isWebBiometricSupported() && currentUser) {
-          try {
-            showToast("🛡️ Updating hardware security anchor...", "info");
-            await saveWebBiometric(currentUser.username, editNewPassword);
-            showToast("Passkey updated for hardware security.", "success");
-          } catch (biomErr) {
-            console.warn("Auto-biometric update skipped:", biomErr);
-          }
+        if (currentUser) {
+          await saveBiometricCredentials(currentUser.username, editNewPassword);
         }
 
         showToast(
@@ -4112,11 +4138,13 @@ export default function App() {
     const dotIndex = fileName.lastIndexOf(".");
     const baseName = dotIndex !== -1 ? fileName.substring(0, dotIndex) : fileName;
     const ext = dotIndex !== -1 ? fileName.substring(dotIndex) : "";
+    const normFolder = (folderPath || "/").trim() || "/";
 
     while (
       files.some(
-        (f) => f.folderPath === folderPath && f.name.toLowerCase() === outputName.toLowerCase() && !f.deletedAt
-      )
+        (f) => ((f.folderPath || "/").trim() || "/") === normFolder && f.name.toLowerCase() === outputName.toLowerCase() && !f.deletedAt
+      ) ||
+      pendingUploadNamesRef.current.has(`${normFolder}::${outputName.toLowerCase()}`)
     ) {
       outputName = `${baseName} (${counter})${ext}`;
       counter++;
@@ -4154,6 +4182,8 @@ export default function App() {
     }
 
     const normCurrentPath = (currentPath || "/").trim() || "/";
+    
+    // Check if an exact matching file already exists in this folder
     const exactExistingStream = files.find(f =>
       !f.isFolder &&
       f.name.toLowerCase() === (file.name || "").toLowerCase() &&
@@ -4166,8 +4196,13 @@ export default function App() {
       return;
     }
 
+    // Generate a unique filename, checking both database and active pending uploads
     const outputName = getUniqueFileName(file.name, currentPath);
     const wasRenamed = outputName !== file.name;
+    const uniqueKey = `${normCurrentPath}::${outputName.toLowerCase()}`;
+    
+    // Register the unique filename as pending to handle high-speed concurrent uploads
+    pendingUploadNamesRef.current.add(uniqueKey);
 
     const tId = startTransfer(outputName, "upload");
     try {
@@ -4227,6 +4262,8 @@ export default function App() {
         updateTransferProgress(tId, 0, "error");
         showToast(err.message || "Failed to stream upload massive file.", "error");
       }
+    } finally {
+      pendingUploadNamesRef.current.delete(uniqueKey);
     }
   };
 
@@ -4265,6 +4302,8 @@ export default function App() {
     }
 
     const normCurrentPathUpload = (currentPath || "/").trim() || "/";
+
+    // Check if an exact matching file already exists in this folder
     const exactExistingFile = files.find(f =>
       !f.isFolder &&
       f.name.toLowerCase() === (name || "").toLowerCase() &&
@@ -4277,8 +4316,13 @@ export default function App() {
       return;
     }
 
+    // Generate a unique filename, checking both database and active pending uploads
     const outputName = getUniqueFileName(name, currentPath);
     const wasRenamed = outputName !== name;
+    const uniqueKey = `${normCurrentPathUpload}::${outputName.toLowerCase()}`;
+
+    // Register the unique filename as pending to handle high-speed concurrent uploads
+    pendingUploadNamesRef.current.add(uniqueKey);
 
     const tId = startTransfer(outputName, "upload");
     try {
@@ -4350,6 +4394,8 @@ export default function App() {
         localStorage.removeItem("vault_session_password");
         showToast("Database reset detected. Please re-enter master password to sync workspace.", "info");
       }
+    } finally {
+      pendingUploadNamesRef.current.delete(uniqueKey);
     }
   };
 
@@ -8173,36 +8219,39 @@ export default function App() {
                 </div>
               </header>
 
-              <div className="flex-1 flex flex-col w-full max-w-7xl mx-auto p-4 sm:p-8 lg:p-12 overflow-y-auto custom-scrollbar">
-                {/* Tabs Navigation (Full Page Style) */}
-                <div className="flex gap-1.5 p-1 bg-slate-900 rounded-[20px] sm:rounded-[24px] mb-6 sm:mb-10 border border-white/5 max-w-4xl overflow-x-auto no-scrollbar scrollbar-none snap-x whitespace-nowrap sticky top-0 z-50">
-                  {[
-                    { id: "general", label: "NODE CONFIG", mobileLabel: "Config", icon: Database },
-                    { id: "security", label: "VAULT SECURITY", mobileLabel: "Security", icon: Shield },
-                    { id: "network", label: "NETWORK MESH", mobileLabel: "Network", icon: Globe },
-                  ].map((tab) => (
-                    <button
-                      key={tab.id}
-                      onClick={() => setSettingsTab(tab.id as any)}
-                      className={`flex-1 flex-shrink-0 sm:flex-shrink items-center justify-center gap-1.5 sm:gap-3 py-2.5 sm:py-3.5 px-3 sm:px-0 rounded-xl sm:rounded-[18px] text-[10px] sm:text-[11px] font-black transition-all snap-center min-w-[80px] sm:min-w-0 ${
-                        settingsTab === tab.id 
-                          ? "bg-indigo-600 text-white shadow-2xl shadow-indigo-600/20 border border-white/10" 
-                          : "text-indigo-300/40 hover:text-white hover:bg-white/5"
-                      }`}
-                    >
-                      <tab.icon className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-                      <span className="hidden sm:inline">{tab.label}</span>
-                      <span className="sm:hidden">{tab.mobileLabel}</span>
-                    </button>
-                  ))}
-                </div>
+              <div className="flex-1 min-h-0 w-full overflow-y-auto custom-scrollbar">
+                <div className="max-w-7xl mx-auto px-4 sm:px-8 lg:px-12 py-6 sm:py-8 pb-16">
+                  {/* Tabs Navigation (Sticky Header Style) */}
+                  <div className="sticky top-0 z-50 bg-[#0a0c10]/95 backdrop-blur-md pt-2 pb-4 mb-6 sm:mb-10">
+                    <div className="flex gap-1.5 p-1.5 bg-slate-900 rounded-[20px] sm:rounded-[24px] border border-white/5 max-w-4xl overflow-x-auto no-scrollbar scrollbar-none snap-x whitespace-nowrap">
+                      {[
+                        { id: "general", label: "NODE CONFIG", mobileLabel: "Config", icon: Database },
+                        { id: "security", label: "VAULT SECURITY", mobileLabel: "Security", icon: Shield },
+                        { id: "network", label: "NETWORK MESH", mobileLabel: "Network", icon: Globe },
+                      ].map((tab) => (
+                        <button
+                          key={tab.id}
+                          onClick={() => setSettingsTab(tab.id as any)}
+                          className={`flex-1 flex-shrink-0 sm:flex-shrink items-center justify-center gap-1.5 sm:gap-3 py-2.5 sm:py-3.5 px-3 sm:px-0 rounded-xl sm:rounded-[18px] text-[10px] sm:text-[11px] font-black transition-all snap-center min-w-[80px] sm:min-w-0 ${
+                            settingsTab === tab.id 
+                              ? "bg-indigo-600 text-white shadow-2xl shadow-indigo-600/20 border border-white/10" 
+                              : "text-indigo-300/40 hover:text-white hover:bg-white/5"
+                          }`}
+                        >
+                          <tab.icon className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                          <span className="hidden sm:inline">{tab.label}</span>
+                          <span className="sm:hidden">{tab.mobileLabel}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
 
-                <div className="flex-1 overflow-y-auto pr-4 custom-scrollbar">
+                  <div className="w-full">
                   {settingsTab === "general" && (
                     <motion.div 
                       initial={{ opacity: 0, y: 20 }}
                       animate={{ opacity: 1, y: 0 }}
-                      className="grid grid-cols-1 lg:grid-cols-2 gap-8"
+                      className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start"
                     >
                       <div className="flex flex-col gap-8">
                         {/* Master Seed Keypack (.vault) */}
@@ -8360,7 +8409,7 @@ export default function App() {
                           </p>
                         </div>
 
-                         <div className="mt-auto pt-10">
+                         <div className="mt-8 pt-2">
                             <div className="bg-white/5 p-6 rounded-2xl border border-white/5 flex items-center gap-4">
                                <div className="w-10 h-10 rounded-xl bg-indigo-500/20 flex items-center justify-center text-indigo-400">
                                   <Cpu className="w-5 h-5" />
@@ -8545,7 +8594,7 @@ export default function App() {
                     <motion.div 
                       initial={{ opacity: 0, y: 20 }}
                       animate={{ opacity: 1, y: 0 }}
-                      className="max-w-4xl space-y-10 pb-10"
+                      className="max-w-4xl space-y-8"
                     >
                       <div className="bg-black/20 border border-white/10 rounded-[24px] sm:rounded-[32px] p-5 sm:p-10">
                         <div className="flex flex-col sm:flex-row justify-between items-start gap-4 mb-8 sm:mb-10">
@@ -9563,9 +9612,10 @@ export default function App() {
                   )}
                 </div>
               </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
         <AnimatePresence>
           {viewingDagBlock && (

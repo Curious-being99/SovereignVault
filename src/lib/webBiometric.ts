@@ -46,7 +46,7 @@ async function deleteEnclaveValue(key: string): Promise<void> {
 }
 
 export function isWebBiometricSupported(): boolean {
-  return typeof window !== "undefined" && !!window.crypto && !!window.crypto.subtle && !!window.indexedDB;
+  return typeof window !== "undefined" && !!window.crypto && !!window.crypto.subtle && !!window.indexedDB && !!navigator.credentials;
 }
 
 export async function hasWebBiometric(username: string): Promise<boolean> {
@@ -249,14 +249,15 @@ export async function getWebBiometric(username: string): Promise<string> {
         }
       }
     } catch (authErr: any) {
+      const isIframe = typeof window !== "undefined" && window.self !== window.top;
       const isCancellation = authErr.name === "NotAllowedError" || 
                              authErr.name === "AbortError" ||
                              authErr.message?.toLowerCase().includes("cancel") ||
                              authErr.message?.toLowerCase().includes("not allowed");
       
       if (isCancellation) {
-        if (authErr.message?.includes("iframe") || authErr.message?.includes("cross-origin")) {
-          throw new Error("Biometric verification is restricted inside preview frames. Please open the app in a new tab for native WebAuthn passkey verification.");
+        if (isIframe || authErr.message?.includes("iframe") || authErr.message?.includes("cross-origin")) {
+          throw new Error("Biometric hardware verification is restricted inside preview frames. Please click 'Open in new tab' to use native WebAuthn passkey verification.");
         }
         throw new Error("Biometric verification cancelled.");
       }
