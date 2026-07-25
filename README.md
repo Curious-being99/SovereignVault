@@ -1,6 +1,6 @@
 # Sovereign Vault 🛡️
 
-Sovereign Vault is an offline-first, heavily-encrypted, and real-time synchronized full-stack file storage application. Designed for maximum security and local ownership, it pairs a modern, fluid React single-page interface with a hardened Express backend using SQLite (`better-sqlite3`).
+Sovereign Vault is an offline-first, heavily-encrypted, and real-time synchronized full-stack file storage application. Designed for maximum security and local ownership, it pairs a modern, fluid React single-page interface with a hardened Hono backend (`better-sqlite3`and OPFS).
 
 The application is fully compatible with mobile environments through Capacitor, enabling native biometrics, direct transfers, and hardware-protected secure storage, complete with a automated GitHub Actions workflow to build and rename Android APKs as `app-sovereignvault.apk`.
 
