@@ -291,12 +291,13 @@ export default function App() {
       api.processSyncQueue().catch(console.error);
     }
 
-    if ('serviceWorker' in navigator) {
+    if ('serviceWorker' in navigator && window.isSecureContext) {
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('/sw.js').then(registration => {
           console.log('SW registered: ', registration);
         }).catch(registrationError => {
-          console.log('SW registration failed: ', registrationError);
+          // Suppress or handle gracefully in restricted sandbox environments
+          console.debug('SW registration skipped or failed: ', registrationError);
         });
       });
     }
@@ -447,19 +448,18 @@ export default function App() {
       // Ensure we have data for all files (expensive but necessary for offline portability)
       const filesWithData = await Promise.all(files.map(async (f) => {
         let fileData = f.data;
-        if (!fileData && !f.isFolder) {
+        if (!fileData && !f.isFolder && f.id) {
           try {
-            // Try to get from local storage first (it might be there even if not in files state)
-            const local = await api.getFiles(currentUser.id, currentUser.privateVaultId);
-            const match = local.find(l => l.id === f.id);
-            if (match && match.data) {
-              fileData = match.data;
+            // Try to get from local storage first via getLocalFile
+            const localFile = await api.getLocalFile(f.id);
+            if (localFile && localFile.data) {
+              fileData = localFile.data;
             } else {
               // Fetch from server
-              fileData = await api.downloadFileContent(currentUser.id, f.id!);
+              fileData = await api.downloadFileContent(currentUser.id, f.id);
             }
           } catch (e) {
-            console.warn(`Could not fetch data for file ${f.name} during backup`, e);
+            // Silently handle if file content is not immediately reachable
           }
         }
 
@@ -506,18 +506,42 @@ export default function App() {
       
       const jsonStr = JSON.stringify(keypack, null, 2);
       const blob = new Blob([jsonStr], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `decentralized_secure_vault_${currentUser.username}_backup.vault`;
-      document.body.appendChild(a);
-      isSystemActionRef.current = true;
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      
-      showToast("Decentralized Master Keypack exported successfully!", "success");
+      const filename = `ofv_vault_${currentUser.username}_backup_${Date.now()}.vault`;
+      let savedToDisk = false;
+
+      if (typeof window !== 'undefined' && 'showSaveFilePicker' in window) {
+        try {
+          const handle = await (window as any).showSaveFilePicker({
+            suggestedName: filename,
+            types: [{
+              description: 'OFV Secure Vault Backup',
+              accept: { 'application/json': ['.vault', '.json'] }
+            }]
+          });
+          const writable = await handle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          savedToDisk = true;
+          showToast("🛡️ Vault saved securely to device disk (Cache-proof backup)!", "success");
+        } catch (pickerErr: any) {
+          if (pickerErr.name !== 'AbortError') {
+            console.warn("File picker save cancelled or failed, falling back to browser download:", pickerErr);
+          }
+        }
+      }
+
+      if (!savedToDisk) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        isSystemActionRef.current = true;
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        showToast("Decentralized Master Keypack exported successfully!", "success");
+      }
     } catch (err: any) {
       showToast(err.message || "Failed to compile backup pack.", "error");
     } finally {
@@ -1236,8 +1260,9 @@ export default function App() {
           userId: currentUser.id,
           data: await blob.arrayBuffer()
         });
+        await storageMod.saveBackupToOpfs(backupFilename, blob);
       } catch (dbErr) {
-        console.warn("[AutoBackup] Local storage save error:", dbErr);
+        console.warn("[AutoBackup] Local storage or OPFS save error:", dbErr);
       }
 
       const now = Date.now();
@@ -1693,7 +1718,7 @@ export default function App() {
   };
 
   // Auto-Lock settings (minutes of inactivity: 0 means disabled)
-  const [autoLockInterval, setAutoLockInterval] = useState<number>(0);
+  const [autoLockInterval, setAutoLockInterval] = useState<number>(2);
 
   useEffect(() => {
     if (currentUser) {
@@ -1703,12 +1728,12 @@ export default function App() {
       ) {
         setAutoLockInterval(currentUser.autoLockInterval);
       } else {
-        // Fallback for older database versions without default
-        setAutoLockInterval(0);
+        // Fallback default to 2 minutes
+        setAutoLockInterval(2);
       }
     } else {
       // Clear out interval when user logs out
-      setAutoLockInterval(0);
+      setAutoLockInterval(2);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser?.id, currentUser?.autoLockInterval]);
@@ -6238,64 +6263,72 @@ export default function App() {
                   </p>
                 </div>
 
-                <div className="bg-slate-950 border border-slate-800 p-5 rounded-2xl mb-10 flex items-center gap-4 text-left">
-                  <Lock className="w-5 h-5 text-indigo-400 shrink-0" />
-                  <p className="text-[11px] font-bold text-slate-400 leading-relaxed uppercase tracking-tight">
-                    Workspace is locked. master seed key required to decrypt storage volumes.
-                  </p>
-                </div>
-
-                <form
-                  onSubmit={(e) => handleLogin(e, currentUser.username)}
-                  className="space-y-6"
-                >
-
-                  <div className="relative mb-4">
-                    <input
-                      type={showPassword ? "text" : "password"}
-                      required
-                      autoFocus
-                      value={passwordInput}
-                      onChange={(e) => setPasswordInput(e.target.value)}
-                      placeholder="Access Token"
-                      className="block w-full rounded-2xl bg-slate-950 border border-slate-800 text-white p-5 pr-14 focus:ring-2 focus:ring-indigo-500 focus:outline-none placeholder-slate-800 text-center text-lg font-black transition-all shadow-inner"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword(!showPassword)}
-                      className="absolute right-5 top-1/2 -translate-y-1/2 text-slate-600 hover:text-white transition-colors"
-                    >
-                      {showPassword ? (
-                        <EyeOff className="w-5 h-5" />
-                      ) : (
-                        <Eye className="w-5 h-5" />
-                      )}
-                    </button>
-                  </div>
-
-                  <button
-                    type="submit"
-                    className="w-full bg-white text-slate-950 py-5 rounded-2xl font-black text-sm tracking-[0.2em] shadow-xl hover:bg-slate-200 active:scale-95 transition-all uppercase mb-6"
-                  >
-                    Unlock Nodes
-                  </button>
-
-                  {/* Automatic Biometric Logic triggered via useEffect */}
-                  <div className="pt-4">
-                    <p className="text-[10px] text-slate-500 text-center font-medium opacity-50 italic uppercase tracking-widest">
-                      Biometric hardware signature active
+                <div className="bg-slate-950 border border-slate-800 p-5 rounded-2xl mb-8 flex items-center gap-4 text-left">
+                  <Shield className="w-6 h-6 text-indigo-400 shrink-0" />
+                  <div>
+                    <p className="text-xs font-black text-white uppercase tracking-wider">
+                      Biometric Security Enclave Active
+                    </p>
+                    <p className="text-[10px] font-bold text-slate-400 leading-relaxed uppercase tracking-tight mt-0.5">
+                      Tap below to verify via hardware passkey / biometric verify page.
                     </p>
                   </div>
+                </div>
 
+                <div className="space-y-4 mb-6">
                   <button
                     type="button"
-                    onClick={() => handleLogout()}
-                    className="text-[10px] font-black text-slate-500 hover:text-white uppercase tracking-[0.2em] transition-colors flex items-center gap-2 mx-auto underline decoration-slate-800 underline-offset-8"
+                    onClick={() => handleBiometricLogin(currentUser.username, false)}
+                    className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-5 rounded-2xl font-black text-sm tracking-[0.2em] shadow-xl hover:scale-[1.02] active:scale-95 transition-all uppercase flex items-center justify-center gap-2"
                   >
-                    <LogOut className="w-3.5 h-3.5" />
-                    De-authenticate Node
+                    <Key className="w-4 h-4" /> Unlock with Biometric Passkey
                   </button>
-                </form>
+                </div>
+
+                {/* Optional Fallback Password Form */}
+                <div className="border-t border-slate-800 pt-6 mt-6 mb-6">
+                  <details className="group">
+                    <summary className="text-[10px] font-black text-slate-400 hover:text-white uppercase tracking-[0.2em] cursor-pointer list-none flex items-center justify-center gap-1.5 transition-colors">
+                      <Lock className="w-3.5 h-3.5" /> Or Unlock with Password / Access Token
+                    </summary>
+                    <form
+                      onSubmit={(e) => handleLogin(e, currentUser.username)}
+                      className="space-y-4 mt-4"
+                    >
+                      <div className="relative">
+                        <input
+                          type={showPassword ? "text" : "password"}
+                          value={passwordInput}
+                          onChange={(e) => setPasswordInput(e.target.value)}
+                          placeholder="Access Token Password"
+                          className="block w-full rounded-2xl bg-slate-950 border border-slate-800 text-white p-4 pr-12 focus:ring-2 focus:ring-indigo-500 focus:outline-none placeholder-slate-700 text-center text-sm font-bold transition-all shadow-inner"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowPassword(!showPassword)}
+                          className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-600 hover:text-white transition-colors"
+                        >
+                          {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                      <button
+                        type="submit"
+                        className="w-full bg-slate-800 hover:bg-slate-700 text-white py-3.5 rounded-xl font-black text-xs tracking-[0.2em] shadow-md active:scale-95 transition-all uppercase"
+                      >
+                        Unlock with Password
+                      </button>
+                    </form>
+                  </details>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => handleLogout()}
+                  className="text-[10px] font-black text-slate-500 hover:text-white uppercase tracking-[0.2em] transition-colors flex items-center gap-2 mx-auto underline decoration-slate-800 underline-offset-8"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  De-authenticate Node
+                </button>
               </motion.div>
             </div>
           ) : (

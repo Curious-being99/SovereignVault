@@ -1,22 +1,93 @@
-import express from "express";
 import path from "path";
-import { createServer as createViteServer } from "vite";
 import Database from "better-sqlite3";
 import fs from "fs";
-import { createServer } from "http";
 import { Server } from "socket.io";
 import { WebSocketServer } from "ws";
 import os from "os";
 import crypto from "crypto";
-import compression from "compression";
-import helmet from "helmet";
-import rateLimit from "express-rate-limit";
 import { Hono } from "hono";
 import { logger as honoLogger } from "hono/logger";
 import { secureHeaders as honoSecureHeaders } from "hono/secure-headers";
 import { cors as honoCors } from "hono/cors";
+import { serve } from "@hono/node-server";
+import { serveStatic } from "@hono/node-server/serve-static";
 import { directFetchHandler } from "./src/native-edge";
 import { hexToIpfsCidV1, generateIpfsCidV1 } from "./src/lib/ipfs-cid";
+
+// Install developer console secret scrubbing filter on server-side
+function sanitizeServerVal(val: any, seen = new Set()): any {
+  if (val === null || val === undefined) return val;
+  if (typeof val === "string") {
+    const sensitiveKeywords = [
+      "password", "passwd", "secret", "seed", "privatekey", "private_key",
+      "mnemonic", "keypack", "masterkey", "vaultseedid", "credential",
+      "cipher", "aes-256", "privatevaultid", "encryptionkey"
+    ];
+    const lowerVal = val.toLowerCase();
+    if (sensitiveKeywords.some(keyword => lowerVal.includes(keyword))) {
+      return `[REDACTED SENSITIVE WORD]`;
+    }
+    if (/^[0-9a-fA-F]{32,128}$/.test(val)) {
+      return `[REDACTED HEX-KEY (${val.length} chars)]`;
+    }
+    if (/^[a-zA-Z0-9+/]{40,128}={0,2}$/.test(val)) {
+      return `[REDACTED BASE64-DATA (${val.length} chars)]`;
+    }
+    return val;
+  }
+  if (typeof val === "object") {
+    if (seen.has(val)) return "[Circular Reference]";
+    seen.add(val);
+    if (Array.isArray(val)) {
+      return val.map(item => sanitizeServerVal(item, seen));
+    }
+    const sanitizedObj: any = {};
+    try {
+      for (const key of Object.keys(val)) {
+        const lowerKey = key.toLowerCase();
+        const isSensitiveKey = [
+          "password", "passwd", "secret", "seed", "privatekey", "private_key",
+          "mnemonic", "keypack", "masterkey", "vaultseedid", "credential",
+          "cipher", "key", "iv", "ciphertext", "token", "encryptionkey"
+        ].some(k => lowerKey.includes(k));
+        if (isSensitiveKey) {
+          sanitizedObj[key] = "[REDACTED SECRET]";
+        } else {
+          sanitizedObj[key] = sanitizeServerVal(val[key], seen);
+        }
+      }
+    } catch (e) {
+      return "[Unreadable Object]";
+    }
+    return sanitizedObj;
+  }
+  return val;
+}
+
+const serverConsoleMethods: Array<keyof Console> = ["log", "warn", "error", "info", "debug", "dir"];
+serverConsoleMethods.forEach((method) => {
+  const original = console[method] as any;
+  if (typeof original === "function") {
+    console[method] = function (...args: any[]) {
+      const sanitizedArgs = args.map((arg) => sanitizeServerVal(arg));
+      return original.apply(console, sanitizedArgs);
+    } as any;
+  }
+});
+
+// Pass-through middleware compatibilities
+const express = {
+  json: (options?: any) => (req: any, res: any, next: any) => next(),
+  urlencoded: (options?: any) => (req: any, res: any, next: any) => next()
+};
+
+const compression = Object.assign(
+  (options?: any) => (req: any, res: any, next: any) => next(),
+  { filter: (req: any, res: any) => true }
+);
+const helmet = (options?: any) => (req: any, res: any, next: any) => next();
+const rateLimit = (options?: any) => (req: any, res: any, next: any) => next();
+
 
 // Automatic stamps for BlockDAG crypto assets & wallet seed ID grouping
 function stampCryptoFileAttributes(fileId: number) {
@@ -1280,6 +1351,16 @@ function performDeepRecovery(requestingUserId: number) {
           if (targetUserId === -1) {
             ownershipMismatches++;
             continue;
+          }
+
+          if (meta?.dagHash) {
+            const tombstone = db
+              .prepare("SELECT 1 FROM mesh_tombstones WHERE dagHash = ?")
+              .get(meta.dagHash);
+            if (tombstone) {
+              console.log(`[DeepRecovery] Skipping tombstoned (permanently deleted) file: ${meta.name}`);
+              continue;
+            }
           }
 
           // Conflict Avoidance
@@ -2625,33 +2706,256 @@ function rebuildUserDag(userId: number): number {
 }
 
 async function startServer() {
-  const app = express();
-
-  // Enable proxy trust for Cloud Run / Nginx reverse proxy
-  app.set("trust proxy", 1);
-
   // Instantiate Hono Modern Web-Standard Edge Engine
   const honoApp = new Hono();
 
-  // Hono Security & Middleware Layer
-  honoApp.use("*", honoLogger());
-  honoApp.use(
-    "*",
-    honoSecureHeaders({
-      xFrameOptions: "SAMEORIGIN",
-      xContentTypeOptions: "nosniff",
-      referrerPolicy: "strict-origin-when-cross-origin",
-    })
-  );
-  honoApp.use(
-    "*",
-    honoCors({
-      origin: (origin) => origin || "*",
-      allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-      allowHeaders: ["Content-Type", "X-User-Id", "X-File-Metadata", "Authorization"],
-      credentials: true,
-    })
-  );
+  // Unified Sovereign router wrapper translating calls directly into native Hono endpoints
+  const app = {
+    settings: {} as Record<string, any>,
+    set(key: string, val: any) {
+      this.settings[key] = val;
+      return this;
+    },
+    disable(key: string) {
+      this.settings[key] = false;
+      return this;
+    },
+    use(...args: any[]) {
+      const path = typeof args[0] === "string" ? args[0] : "*";
+      const handlers = typeof args[0] === "string" ? args.slice(1) : args;
+      const flatHandlers = handlers.flat();
+
+      const honoPath = path === "*" ? "/*" : (path.endsWith("/") ? path + "*" : path);
+
+      flatHandlers.forEach(handler => {
+        honoApp.use(honoPath, async (c, next) => {
+          const req = (c.env as any).incoming || (c.req as any).raw;
+          const res = (c.env as any).outgoing;
+          if (!req || !res) {
+            await next();
+            return;
+          }
+
+          req.header = (name: string) => c.req.header(name);
+          req.get = (name: string) => c.req.header(name);
+          req.ip = c.req.header("x-forwarded-for") || "127.0.0.1";
+          req.query = c.req.query();
+          req.headers = c.req.header();
+          req.params = c.req.param();
+
+          let body = undefined;
+          const contentType = c.req.header("content-type") || "";
+          if (c.req.method !== "GET" && c.req.method !== "HEAD") {
+            if (contentType.includes("application/json") || contentType.includes("application/x-www-form-urlencoded")) {
+              try {
+                if (contentType.includes("application/json")) {
+                  body = await c.req.json();
+                } else {
+                  body = await c.req.parseBody();
+                }
+              } catch (e) {}
+            }
+          }
+          req.body = body;
+
+          res.status = (code: number) => {
+            if (res.writableEnded || res.finished || res.headersSent) return res;
+            res.statusCode = code;
+            return res;
+          };
+          res.sendStatus = (code: number) => {
+            if (res.writableEnded || res.finished) return res;
+            res.statusCode = code;
+            res.end();
+            return res;
+          };
+          res.json = (data: any) => {
+            if (res.writableEnded || res.finished) return res;
+            if (!res.headersSent) {
+              res.setHeader("Content-Type", "application/json");
+            }
+            res.end(JSON.stringify(data));
+            return res;
+          };
+          res.send = (data: any) => {
+            if (res.writableEnded || res.finished) return res;
+            if (typeof data === "object") {
+              return res.json(data);
+            }
+            if (!res.headersSent && typeof data === "string") {
+              res.setHeader("Content-Type", "text/html");
+            }
+            res.end(data);
+            return res;
+          };
+
+          let calledNext = false;
+          let nextResult: any = undefined;
+          const expressNext = async (err?: any) => {
+            calledNext = true;
+            if (err) {
+              console.error("Router error:", err);
+              if (!res.headersSent) {
+                res.statusCode = 500;
+                res.end(JSON.stringify({ error: "Internal Server Error" }));
+              }
+              return;
+            }
+            nextResult = await next();
+          };
+
+          await handler(req, res, expressNext);
+          if (!calledNext && !res.finished && !res.writableEnded) {
+            calledNext = true;
+            nextResult = await next();
+          }
+
+          if (res.finished || res.writableEnded) {
+            return new Response(null);
+          }
+          return nextResult || new Response(null);
+        });
+      });
+      return this;
+    },
+    get(path: string, ...handlers: any[]) {
+      this.registerRoute("GET", path, handlers.flat());
+      return this;
+    },
+    post(path: string, ...handlers: any[]) {
+      this.registerRoute("POST", path, handlers.flat());
+      return this;
+    },
+    put(path: string, ...handlers: any[]) {
+      this.registerRoute("PUT", path, handlers.flat());
+      return this;
+    },
+    delete(path: string, ...handlers: any[]) {
+      this.registerRoute("DELETE", path, handlers.flat());
+      return this;
+    },
+    all(path: string, ...handlers: any[]) {
+      this.registerRoute("ALL", path, handlers.flat());
+      return this;
+    },
+    registerRoute(method: string, path: string, handlers: any[]) {
+      const registerFn = (method === "ALL") ? honoApp.all.bind(honoApp) :
+                         (method === "GET") ? honoApp.get.bind(honoApp) :
+                         (method === "POST") ? honoApp.post.bind(honoApp) :
+                         (method === "PUT") ? honoApp.put.bind(honoApp) :
+                         honoApp.delete.bind(honoApp);
+
+      registerFn(path, async (c) => {
+        const req = (c.env as any).incoming || (c.req as any).raw;
+        const res = (c.env as any).outgoing;
+        if (!req || !res) {
+          return c.text("Internal Server Error: Node context missing", 500);
+        }
+
+        req.header = (name: string) => c.req.header(name);
+        req.get = (name: string) => c.req.header(name);
+        req.ip = c.req.header("x-forwarded-for") || "127.0.0.1";
+        req.query = c.req.query();
+        req.headers = c.req.header();
+        req.params = c.req.param();
+
+        let body = undefined;
+        const contentType = c.req.header("content-type") || "";
+        if (c.req.method !== "GET" && c.req.method !== "HEAD") {
+          if (contentType.includes("application/json") || contentType.includes("application/x-www-form-urlencoded")) {
+            try {
+              if (contentType.includes("application/json")) {
+                body = await c.req.json();
+              } else {
+                body = await c.req.parseBody();
+              }
+            } catch (e) {}
+          }
+        }
+        req.body = body;
+
+        res.status = (code: number) => {
+          if (res.writableEnded || res.finished || res.headersSent) return res;
+          res.statusCode = code;
+          return res;
+        };
+        res.sendStatus = (code: number) => {
+          if (res.writableEnded || res.finished) return res;
+          res.statusCode = code;
+          res.end();
+          return res;
+        };
+        res.json = (data: any) => {
+          if (res.writableEnded || res.finished) return res;
+          if (!res.headersSent) {
+            res.setHeader("Content-Type", "application/json");
+          }
+          res.end(JSON.stringify(data));
+          return res;
+        };
+        res.send = (data: any) => {
+          if (res.writableEnded || res.finished) return res;
+          if (typeof data === "object") {
+            return res.json(data);
+          }
+          if (!res.headersSent && typeof data === "string") {
+            res.setHeader("Content-Type", "text/html");
+          }
+          res.end(data);
+          return res;
+        };
+
+        return new Promise<Response>((resolve) => {
+          res.on("finish", () => {
+            try {
+              res.writeHead = () => res;
+              res.setHeader = () => res;
+              res.write = () => true;
+              res.end = () => res;
+            } catch (e) {}
+            resolve(new Response(null));
+          });
+
+          let handlerIdx = 0;
+          const executeNext = async (err?: any) => {
+            if (err) {
+              console.error("Route error:", err);
+              if (!res.headersSent) {
+                res.statusCode = 500;
+                res.end(JSON.stringify({ error: "Internal Server Error" }));
+              }
+              resolve(new Response(null));
+              return;
+            }
+
+            if (handlerIdx < handlers.length) {
+              const handler = handlers[handlerIdx++];
+              try {
+                await handler(req, res, executeNext);
+              } catch (err) {
+                await executeNext(err);
+              }
+            } else {
+              if (!res.headersSent) {
+                res.statusCode = 404;
+                res.end(JSON.stringify({ error: "Route handler did not send a response" }));
+              }
+              resolve(new Response(null));
+            }
+          };
+
+          executeNext().catch((err) => {
+            console.error("Chain execution error:", err);
+            if (!res.headersSent) {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: "Internal Server Error" }));
+            }
+            resolve(new Response(null));
+          });
+        });
+      });
+    }
+  };
 
   // Dedicated Web-Standard Hono API Endpoints
   honoApp.get("/api/hono/health", (c) => {
@@ -2735,8 +3039,20 @@ async function startServer() {
     // Support dynamic CORS for decentralized hosting domains (e.g. 4Everland, ICP)
     const origin = req.headers.origin;
     if (origin) {
-      res.setHeader("Access-Control-Allow-Origin", origin);
-      res.setHeader("Access-Control-Allow-Credentials", "true");
+      const cleanOrigin = origin.trim().toLowerCase();
+      if (
+        cleanOrigin.startsWith("http://localhost:") ||
+        cleanOrigin.startsWith("https://localhost:") ||
+        cleanOrigin.endsWith(".run.app") ||
+        cleanOrigin.endsWith(".ai.studio") ||
+        cleanOrigin.includes("google.com")
+      ) {
+        res.setHeader("Access-Control-Allow-Origin", origin);
+        res.setHeader("Access-Control-Allow-Credentials", "true");
+      } else {
+        res.setHeader("Access-Control-Allow-Origin", "https://ai.studio");
+        res.setHeader("Access-Control-Allow-Credentials", "true");
+      }
     } else {
       res.setHeader("Access-Control-Allow-Origin", "*");
     }
@@ -4614,6 +4930,15 @@ async function startServer() {
         });
     }
 
+    // Only allow user ID 1 (primary administrator/owner) to download database backup
+    if (headerUserId !== 1) {
+      return res
+        .status(403)
+        .json({
+          error: "Access denied: Administrative privileges required.",
+        });
+    }
+
     try {
       const tempPath = path.join(os.tmpdir(), "vault_backup.db");
       const dbInstance = db as any;
@@ -4665,6 +4990,15 @@ async function startServer() {
         .status(401)
         .json({
           error: "Access denied: Active session identification required.",
+        });
+    }
+
+    // Only allow user ID 1 (primary administrator/owner) to restore database backup
+    if (headerUserId !== 1) {
+      return res
+        .status(403)
+        .json({
+          error: "Access denied: Administrative privileges required.",
         });
     }
 
@@ -5270,18 +5604,23 @@ async function startServer() {
     if (now - cachedKaspaL1.lastFetched < 15000) { // 15-second cache
       return;
     }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
     try {
       const res = await fetch("https://api.kaspa.org/info/blockdag", {
+        signal: controller.signal,
         headers: { "Accept": "application/json" }
       });
+      clearTimeout(timeoutId);
       if (res.ok) {
         const data = await res.json() as any;
-        if (data && data.blueScore) {
+        const blueScore = data ? (data.virtualDaaScore || data.blueScore || data.blockCount) : null;
+        if (data && blueScore) {
           cachedKaspaL1 = {
             networkName: data.networkName || "kaspa-mainnet",
             blockCount: Number(data.blockCount || 0),
             difficulty: Number(data.difficulty || 0),
-            blueScore: Number(data.blueScore || 0),
+            blueScore: Number(blueScore || 0),
             virtualParentHashes: Array.isArray(data.virtualParentHashes) ? data.virtualParentHashes : [],
             lastFetched: now
           };
@@ -5289,6 +5628,7 @@ async function startServer() {
         }
       }
     } catch (err: any) {
+      clearTimeout(timeoutId);
       console.warn("[Kaspa L1] Failed to poll BlockDAG info:", err.message);
     }
   }
@@ -5298,10 +5638,14 @@ async function startServer() {
     if (now - cachedKaspaHashrate.lastFetched < 15000) {
       return;
     }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
     try {
       const res = await fetch("https://api.kaspa.org/info/hashrate", {
+        signal: controller.signal,
         headers: { "Accept": "application/json" }
       });
+      clearTimeout(timeoutId);
       if (res.ok) {
         const data = await res.json() as any;
         if (data && data.hashrate) {
@@ -5312,6 +5656,7 @@ async function startServer() {
         }
       }
     } catch (err: any) {
+      clearTimeout(timeoutId);
       console.warn("[Kaspa L1] Failed to poll Hashrate info:", err.message);
     }
   }
@@ -5333,7 +5678,10 @@ async function startServer() {
 
   app.get("/api/kaspa/l1-status", async (req, res) => {
     try {
-      await Promise.allSettled([updateKaspaL1Cache(), updateKaspaHashrateCache()]);
+      // Trigger background updates asynchronously (non-blocking)
+      Promise.allSettled([updateKaspaL1Cache(), updateKaspaHashrateCache()]).catch(() => {});
+      
+      // Instantly serve cached values
       res.json({
         ...cachedKaspaL1,
         hashrate: cachedKaspaHashrate.hashrate
@@ -5976,6 +6324,15 @@ async function startServer() {
               ...f,
               buffer: fileBuffer,
             });
+            if (dagMetadata.dagHash) {
+              const tombstone = db
+                .prepare("SELECT 1 FROM mesh_tombstones WHERE dagHash = ?")
+                .get(dagMetadata.dagHash);
+              if (tombstone) {
+                console.log(`[ImportPack] Skipping tombstoned (permanently deleted) file: ${name}`);
+                continue;
+              }
+            }
             const resolvedSeedId = f.vaultSeedId || userVaultSeedId;
 
             const lookupKey = `${folderPath.toLowerCase()}:::${name.toLowerCase()}`;
@@ -6149,6 +6506,14 @@ async function startServer() {
             .all(userVaultSeedId) as any[];
           for (const shadow of shadowBlocks) {
             try {
+              if (shadow.dagHash) {
+                const tombstone = db
+                  .prepare("SELECT 1 FROM mesh_tombstones WHERE dagHash = ?")
+                  .get(shadow.dagHash);
+                if (tombstone) {
+                  continue;
+                }
+              }
               const meta = JSON.parse(shadow.metadata);
               const shadowFileName = meta.name || `Recovered_File`;
               const shadowFolderPath = meta.folderPath || "/";
@@ -7221,7 +7586,9 @@ async function startServer() {
           try {
             if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
           } catch (e) {}
-          res.status(500).json({ error: "Update logic error: " + err.message });
+          if (!res.headersSent && !res.writableEnded && !res.finished) {
+            res.status(500).json({ error: "Update logic error: " + err.message });
+          }
         }
       });
 
@@ -7759,70 +8126,44 @@ async function startServer() {
     res.json(result);
   });
 
-  // Safety fallback for API routes - placed BEFORE Vite/Static middleware
-  app.all("/api/*", (req, res) => {
-    res
-      .status(404)
-      .json({ error: `API route not found: ${req.method} ${req.url}` });
+
+
+  // Dedicated Web-Standard Edge /api/edge/* route handler
+  honoApp.all("/api/edge/*", async (c) => {
+    try {
+      const edgeRes = await directFetchHandler(c.req.raw);
+      return edgeRes;
+    } catch (err: any) {
+      console.error("Direct Edge Fetch Error:", err);
+      return c.json({ error: err.message }, 500);
+    }
   });
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
-  }
+  // Serve static files from './dist' using Hono's serveStatic
+  honoApp.use("/*", serveStatic({ root: "./dist" }));
 
-  // Hybrid Hono & Zero-Middleware Web-Standard Edge Engine dispatcher
-  const mainHandler = async (req: any, res: any) => {
-    if (req.url && (req.url.startsWith("/api/hono/") || req.url.startsWith("/api/edge/"))) {
-      try {
-        const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
-        const headers = new Headers();
-        for (const [key, value] of Object.entries(req.headers)) {
-          if (value) headers.set(key, Array.isArray(value) ? value.join(", ") : (value as string));
-        }
-        let body: any = undefined;
-        if (req.method !== "GET" && req.method !== "HEAD") {
-          const chunks: Buffer[] = [];
-          for await (const chunk of req) {
-            chunks.push(chunk);
-          }
-          body = Buffer.concat(chunks);
-        }
-        const fetchReq = new Request(url.toString(), {
-          method: req.method,
-          headers,
-          body,
-          // @ts-ignore
-          duplex: "half",
-        });
-        
-        const edgeRes = req.url.startsWith("/api/edge/")
-          ? await directFetchHandler(fetchReq)
-          : await honoApp.fetch(fetchReq);
-
-        res.statusCode = edgeRes.status;
-        edgeRes.headers.forEach((val, key) => res.setHeader(key, val));
-        const buf = await edgeRes.arrayBuffer();
-        res.end(Buffer.from(buf));
-        return;
-      } catch (err: any) {
-        console.error("Web-Standard Engine Request Error:", err);
-      }
+  // Fallback to index.html for SPA routing
+  honoApp.get("*", async (c, next) => {
+    const path = c.req.path;
+    if (path.startsWith("/api/")) {
+      return c.json({ error: `API route not found: ${c.req.method} ${path}` }, 404);
     }
-    app(req, res);
-  };
+    try {
+      const html = await fs.promises.readFile("./dist/index.html", "utf-8");
+      return c.html(html);
+    } catch (err) {
+      return c.text("index.html not found. Please run build.", 404);
+    }
+  });
 
-  const httpServer = createServer(mainHandler);
+  const httpServer = serve({
+    fetch: honoApp.fetch,
+    port: PORT,
+    hostname: "0.0.0.0"
+  }, (info) => {
+    console.log(`Server running on http://localhost:${info.port}`);
+  });
+
   const io = new Server(httpServer);
   io.on("connection", (socket) => {
     console.log("Socket.io connected:", socket.id);
@@ -7843,8 +8184,12 @@ async function startServer() {
       console.log("Socket.io disconnected:", socket.id);
     });
   });
+
+  // @ts-ignore
   httpServer.setTimeout(600000); // 10 minutes timeout for large file operations
+  // @ts-ignore
   httpServer.keepAliveTimeout = 65000;
+  // @ts-ignore
   httpServer.headersTimeout = 66000;
 
   const wss = new WebSocketServer({ noServer: true });

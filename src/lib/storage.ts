@@ -409,6 +409,37 @@ async function writeOpfsBlob(id: string | number, data: ArrayBuffer) {
   }
 }
 
+async function getOpfsBackupsDir() {
+  if (typeof navigator === 'undefined' || !navigator.storage || !navigator.storage.getDirectory) return null;
+  try {
+    const root = await navigator.storage.getDirectory();
+    return await root.getDirectoryHandle('vault_backups', { create: true });
+  } catch (e) {
+    return null;
+  }
+}
+
+export async function saveBackupToOpfs(filename: string, data: ArrayBuffer | string | Blob): Promise<boolean> {
+  const dir = await getOpfsBackupsDir();
+  if (!dir) return false;
+  try {
+    const fileHandle = await dir.getFileHandle(filename, { create: true });
+    // @ts-ignore
+    const writable = await fileHandle.createWritable();
+    if (data instanceof Blob) {
+      await writable.write(await data.arrayBuffer());
+    } else {
+      await writable.write(data);
+    }
+    await writable.close();
+    console.log(`[OPFS] Successfully auto-backed up ${filename} to Origin Private File System.`);
+    return true;
+  } catch (e) {
+    console.warn('Failed to auto-backup to OPFS:', e);
+    return false;
+  }
+}
+
 async function readOpfsBlob(id: string | number): Promise<ArrayBuffer | null> {
   const dir = await getOpfsBlobsDir();
   if (!dir) return null;
